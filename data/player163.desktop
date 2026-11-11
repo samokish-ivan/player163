@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=player163
+GenericName=Music Player
+Comment=Small, no-fuss music player for your music folder
+Exec=player163 %U
+Icon=player163
+Terminal=false
+StartupNotify=true
+StartupWMClass=Player163
+Categories=AudioVideo;Audio;Player;GTK;
+Keywords=music;audio;player;flac;alac;mp3;ogg;opus;
+MimeType=audio/flac;audio/x-flac;audio/mpeg;audio/mp3;audio/mp4;audio/x-m4a;audio/aac;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/x-opus+ogg;audio/wav;audio/x-wav;audio/x-aiff;audio/x-ape;audio/x-wavpack;audio/x-ms-wma;audio/x-musepack;audio/x-matroska;

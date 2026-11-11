@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="120" viewBox="0 0 520 120">
+  <rect x="0" y="0" width="520" height="120" rx="60" fill="#0b0b0b"/>
+  <g transform="translate(22,4) scale(0.88)"><path d="M65.33 25.52 A38 38 0 0 1 101.86 60.19" fill="none" stroke="#FFC400" stroke-width="7.5" stroke-linecap="round"/>
+  <path d="M59.37 101.22 A38 38 0 0 1 26.14 66.81" fill="none" stroke="#FFC400" stroke-width="7.5" stroke-linecap="round"/>
+  <path d="M49 45.5 L82 64.5 L49 83.5 Z" fill="#FFC400" stroke="#FFC400" stroke-width="6" stroke-linejoin="round"/></g>
+  <rect x="148" y="34" width="3" height="52" rx="1.5" fill="#444"/>
+  <text x="178" y="80" font-family="Ubuntu, Inter, 'Noto Sans', sans-serif" font-weight="800" font-size="56" fill="#fff">player<tspan fill="#FFC400">163</tspan></text>
+</svg>

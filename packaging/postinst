@@ -1,0 +1,25 @@
+#!/bin/sh
+# player163 — add the player163 update source, so new versions arrive in Update Manager.
+# Added once (new installs, or upgrades from a version before 1.3.0). If you remove or
+# disable it in Software Sources, later installs leave your choice alone.
+set -e
+
+LIST=/etc/apt/sources.list.d/player163.list
+KEYRING=/usr/share/keyrings/player163-archive-keyring.gpg
+MARK=/var/lib/player163/readd-source   # left by postrm when uninstalling removed the source
+REPO_URL="@REPO_URL@"
+
+if [ "$1" = "configure" ] && [ -f "$KEYRING" ] && [ ! -e "$LIST" ]; then
+    if [ -z "$2" ] || [ -e "$MARK" ] || dpkg --compare-versions "$2" lt 1.3.0; then
+        cat > "$LIST" <<SRC
+# player163 updates — https://github.com/samokish-ivan/player163
+# To stop automatic updates, disable or remove this source in Software Sources.
+deb [signed-by=$KEYRING] $REPO_URL stable main
+SRC
+        chmod 644 "$LIST"
+    fi
+fi
+rm -f "$MARK"
+rmdir /var/lib/player163 2>/dev/null || true
+
+exit 0

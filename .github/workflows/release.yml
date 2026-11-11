@@ -1,0 +1,90 @@
+# Publishing a GitHub Release (tag like v1.3.0) does everything:
+#   1. builds player163_<version>_all.deb (version taken from the tag)
+#   2. attaches it to the release, plus player163_latest_all.deb for a stable download link
+#   3. rebuilds the signed APT repository from every release and publishes it to GitHub Pages
+#      (branch gh-pages), so Update Manager offers the new version to everyone.
+# One-time setup: see RELEASING.md (needs the APT_SIGNING_KEY secret).
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}   # "Run workflow" rebuilds the update site without a new release
+
+permissions:
+  contents: write
+
+concurrency:
+  group: player163-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq dpkg-dev apt-utils
+
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          if [ -z "$APT_SIGNING_KEY" ]; then
+            echo "::error::Missing the APT_SIGNING_KEY secret. See RELEASING.md, step 2."
+            exit 1
+          fi
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
+          KEYID=$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+          gpg --batch --export "$KEYID" > "$RUNNER_TEMP/player163-archive-keyring.gpg"
+
+      - name: Build the .deb
+        if: github.event_name == 'release'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
+            echo "::error::Release tag must look like v1.3.0 (got $GITHUB_REF_NAME)"
+            exit 1
+          fi
+          VERSION="$VERSION" KEYRING="$RUNNER_TEMP/player163-archive-keyring.gpg" ./build-deb.sh
+          cp "build/player163_${VERSION}_all.deb" build/player163_latest_all.deb
+
+      - name: Attach the .deb to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" build/player163_*_all.deb --clobber
+
+      - name: Collect every released .deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p debs
+          gh release list --limit 200 --json tagName,isDraft --jq '.[] | select(.isDraft | not) | .tagName' |
+          while read -r tag; do
+            gh release download "$tag" --pattern 'player163_[0-9]*_all.deb' --dir debs --clobber || true
+          done
+          ls -l debs
+
+      - name: Build the signed APT repository
+        env:
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+        run: |
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          NAME="${GITHUB_REPOSITORY##*/}"
+          scripts/build-apt-repo.sh debs site "$KEYID" "https://${OWNER,,}.github.io/${NAME}"
+
+      - name: Publish to GitHub Pages (gh-pages branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "APT repository for ${GITHUB_REF_NAME}"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          echo "Published. Update site: https://${GITHUB_REPOSITORY_OWNER,,}.github.io/${GITHUB_REPOSITORY##*/}/"

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>player163 — updates</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0f0f0f; color: #f2f2f2; font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Ubuntu, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 48px 24px 64px; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand svg { width: 64px; height: 64px; }
+  h1 { font-size: 2rem; margin: 0; font-weight: 800; letter-spacing: -0.01em; }
+  h1 span { color: #FFC400; }
+  h2 { font-size: 1.1rem; margin: 36px 0 8px; }
+  p { color: #c9c9c9; margin: 8px 0; }
+  a { color: #FFC400; }
+  .btn { display: inline-block; margin: 18px 0 4px; padding: 12px 22px; background: #FFC400; color: #111; border-radius: 999px; font-weight: 700; text-decoration: none; }
+  .btn:hover { background: #ffd23f; }
+  pre { background: #171717; border: 1px solid #262626; border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 0.85rem; color: #eaeaea; }
+  .muted { color: #8c8c8c; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">
+    <svg viewBox="0 0 128 128" aria-hidden="true">  <rect x="8" y="8" width="112" height="112" rx="28" fill="#0b0b0b"/>  <path d="M65.33 25.52 A38 38 0 0 1 101.86 60.19" fill="none" stroke="#FFC400" stroke-width="7.5" stroke-linecap="round"/>  <path d="M59.37 101.22 A38 38 0 0 1 26.14 66.81" fill="none" stroke="#FFC400" stroke-width="7.5" stroke-linecap="round"/>  <path d="M49 45.5 L82 64.5 L49 83.5 Z" fill="#FFC400" stroke="#FFC400" stroke-width="6" stroke-linejoin="round"/></svg>
+    <h1>player<span>163</span></h1>
+  </div>
+  <p>A small, no-fuss music player for Linux Mint. Latest version: <strong>@LATEST@</strong></p>
+
+  <a class="btn" href="https://github.com/samokish-ivan/player163/releases/latest/download/player163_latest_all.deb">Download player163 (.deb)</a>
+  <p class="muted">Double-click the file and choose <em>Install Package</em>.</p>
+
+  <h2>Updates</h2>
+  <p>Installing the .deb also adds this update source, so new versions show up in Mint's
+     <strong>Update Manager</strong> like any other update. You can turn it off anytime in
+     <em>Software Sources → Additional repositories</em>.</p>
+
+  <h2>Set up updates by hand (optional)</h2>
+  <p>If you'd rather add the source yourself and install with apt:</p>
+<pre>wget -qO- @REPO_URL@/player163.asc | gpg --dearmor | sudo tee /usr/share/keyrings/player163-archive-keyring.gpg &gt;/dev/null
+echo "deb [signed-by=/usr/share/keyrings/player163-archive-keyring.gpg] @REPO_URL@ stable main" | sudo tee /etc/apt/sources.list.d/player163.list
+sudo apt update &amp;&amp; sudo apt install player163</pre>
+
+  <p class="muted">Source code and changelog on <a href="https://github.com/samokish-ivan/player163">GitHub</a> ·
+     By <a href="https://ivansamokish.com">Ivan Samokish</a> · MIT licence</p>
+</main>
+</body>
+</html>

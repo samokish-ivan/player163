@@ -1,0 +1,19 @@
+#!/bin/sh
+# player163 — remove the update source when the app is uninstalled.
+set -e
+
+LIST=/etc/apt/sources.list.d/player163.list
+
+if [ "$1" = "remove" ]; then
+    # Only remember to restore it if it was actually enabled (respects an earlier opt-out)
+    if [ -e "$LIST" ] && grep -q '^deb ' "$LIST"; then
+        mkdir -p /var/lib/player163 && touch /var/lib/player163/readd-source
+    fi
+    rm -f "$LIST"
+fi
+if [ "$1" = "purge" ]; then
+    rm -f "$LIST"
+    rm -rf /var/lib/player163
+fi
+
+exit 0

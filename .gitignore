@@ -1,0 +1,7 @@
+build/
+__pycache__/
+*.pyc
+# never commit signing keys
+*signing-key*.asc
+*.key
+secring.*
