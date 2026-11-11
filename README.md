@@ -2,6 +2,16 @@
 
 A small, no-fuss music player for Linux Mint (and Ubuntu / Debian).
 
+![player163 library in the dark theme](screenshots/1-library-dark.png)
+
+| Albums, light theme | Favorites |
+| --- | --- |
+| ![Albums view in the light theme](screenshots/2-albums-light.png) | ![Favorites view](screenshots/3-favorites-dark.png) |
+
+**Mini player**, dark and light:
+
+![Mini player in dark and light themes](screenshots/4-mini-player.png)
+
 ## Install
 
 **[Download the latest player163 (.deb)](https://github.com/samokish-ivan/player163/releases/latest/download/player163_latest_all.deb)**,
