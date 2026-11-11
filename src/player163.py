@@ -14,12 +14,12 @@ Author: Ivan Samokish
 
 import base64
 import hashlib
-import html
 import json
 import os
 import queue
 import random
 import re
+import shutil
 import sqlite3
 import sys
 import threading
@@ -34,10 +34,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
-gi.require_version("PangoCairo", "1.0")
 gi.require_version("Gst", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gst, Gtk, Pango, PangoCairo  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gst, Gtk, Pango  # noqa: E402
 try:  # tray icon on Linux Mint (Cinnamon, MATE, Xfce)
     gi.require_version("XApp", "1.0")
     from gi.repository import XApp  # noqa: E402
@@ -65,18 +64,16 @@ except ImportError:  # pragma: no cover
 
 APP_NAME = "player163"
 APP_ID = "com.smokyfish.Player163"
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "player163")
 DATA_DIR = os.path.join(GLib.get_user_data_dir(), "player163")
 CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "player163")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-ARTIST_DIR = os.path.join(DATA_DIR, "artists")
+ARTIST_DIR = os.path.join(DATA_DIR, "artists")   # artist pictures (removed in 1.7.1; cleaned up)
 COVER_DIR = os.path.join(DATA_DIR, "covers")
-AVATAR = 40
 USER_AGENT = "player163/%s (https://github.com/samokish-ivan/player163) Python-urllib/%d.%d" % (
     VERSION, sys.version_info[0], sys.version_info[1])
-WIKIMEDIA_WIDTHS = ("500", "330", "250")  # Wikimedia only serves standard thumbnail sizes
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
 ALBUM_THUMB = 40
 SMALL_THUMB = 18
@@ -161,12 +158,33 @@ def on_screen(x, y):
     return False
 
 
+CFG_TYPES = {"long_minutes": (int, float), "long_speed": (int, float), "text_scale": (int, float),
+             "volume": (int, float), "width": int, "height": int, "pane": int, "last_pos": (int, float),
+             "folders": list, "player_pos": str, "theme": str, "mode": str}
+
+
 def load_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
     except Exception:
         return {}
+    if not isinstance(cfg, dict):
+        return {}
+    for k, typ in CFG_TYPES.items():
+        if k in cfg and (not isinstance(cfg[k], typ) or isinstance(cfg[k], bool)):
+            del cfg[k]
+    if "folders" in cfg:
+        cfg["folders"] = [f for f in cfg["folders"] if isinstance(f, str) and os.path.isabs(f)]
+    if cfg.get("theme") not in (None, "dark", "light"):
+        del cfg["theme"]
+    if "long_speed" in cfg and cfg["long_speed"] not in SPEEDS:
+        cfg["long_speed"] = 1.0
+    if "text_scale" in cfg and not 0.8 <= cfg["text_scale"] <= 1.5:
+        cfg["text_scale"] = 1.0
+    if "long_minutes" in cfg and not 1 <= cfg["long_minutes"] <= 600:
+        cfg["long_minutes"] = 20
+    return cfg
 
 
 def save_config(cfg):
@@ -455,12 +473,15 @@ def stored_cover_stamp(album_key):
         return 0
 
 
-def normalize_cover(data, limit=1200):
-    """Any JPEG/PNG/GIF → (bytes, mime), at most `limit` px, safe to embed. None if unusable."""
+def normalize_cover(data, limit=1200, reencode=False):
+    """Any JPEG/PNG/GIF → (bytes, mime), at most `limit` px, safe to embed. None if unusable.
+    reencode=True always decodes and re-saves the pixels (used for anything downloaded)."""
     dims = image_dimensions(data) if data else None
     if not dims:
         return None
-    if data[:2] == b"\xff\xd8" and max(dims) <= limit:
+    if reencode:
+        pass
+    elif data[:2] == b"\xff\xd8" and max(dims) <= limit:
         return data, "image/jpeg"
     if data[:8] == b"\x89PNG\r\n\x1a\n" and max(dims) <= limit:
         return data, "image/png"
@@ -610,146 +631,84 @@ def pixbuf_from_bytes(data, size):
 
 
 # ----------------------------------------------------------------------------------------
-# Artist pictures: your own, or a free photo from Wikimedia Commons (via MusicBrainz + Wikidata)
+# Missing album covers: MusicBrainz (album → release group) → Cover Art Archive
 # ----------------------------------------------------------------------------------------
 
-
-def artist_slug(name):
-    return hashlib.md5(name.casefold().encode("utf-8", "surrogateescape"), usedforsecurity=False).hexdigest()
-
-
-def artist_files(name):
-    base = os.path.join(ARTIST_DIR, artist_slug(name))
-    return base + ".png", base + ".json"
+RETRY_CODES = (429, 500, 502, 503, 504)   # "busy / slow down": wait and try again
+RETRY_DELAYS = (3, 8, 20)
+LOOKUP_RETRY_SCALE = 1.0   # tests shrink the "try again in a minute" wait
+MB_GAP = [1.1]   # seconds between MusicBrainz requests; grows after a "busy" answer
 
 
-def artist_meta(name):
+def _retry_wait(err, attempt):
     try:
-        with open(artist_files(name)[1], "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+        ra = int(err.headers.get("Retry-After", "")) if getattr(err, "headers", None) else 0
+    except (TypeError, ValueError):
+        ra = 0
+    return min(60, max(ra, RETRY_DELAYS[attempt]))
 
 
-def save_artist_picture(name, data, meta):
-    """Square-crop the image, store 192px PNG + its source/credit. Returns True on success."""
-    pb = pixbuf_from_bytes(data, 640)
-    if pb is None:
-        return False
-    w, h = pb.get_width(), pb.get_height()
-    side = min(w, h)
-    top = max(0, int((h - side) * 0.25))  # portraits: keep faces (upper part) in frame
-    sq = pb.new_subpixbuf((w - side) // 2, top, side, side).scale_simple(192, 192, GdkPixbuf.InterpType.BILINEAR)
-    os.makedirs(ARTIST_DIR, exist_ok=True)
-    png, js = artist_files(name)
-    sq.savev(png, "png", [], [])
-    meta = dict(meta, fetched=time.time())
-    with open(js, "w", encoding="utf-8") as f:
-        json.dump(meta, f)
-    return True
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith("https://"):
+            raise urllib.error.HTTPError(newurl, code, "refusing redirect to a non-https address", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def mark_artist_missing(name):
-    os.makedirs(ARTIST_DIR, exist_ok=True)
-    png, js = artist_files(name)
-    if os.path.exists(png):
-        os.remove(png)
-    with open(js, "w", encoding="utf-8") as f:
-        json.dump({"source": "none", "fetched": time.time()}, f)
+# Only https; no proxies-from-files, no ftp/file/data handlers: just HTTPS with safe redirects.
+_OPENER = urllib.request.OpenerDirector()
+for _h in (urllib.request.ProxyHandler(), urllib.request.HTTPSHandler(), _HttpsOnlyRedirects(),
+           urllib.request.HTTPErrorProcessor(), urllib.request.HTTPDefaultErrorHandler()):
+    _OPENER.add_handler(_h)
 
 
-def remove_artist_picture(name):
-    for fn in artist_files(name):
+def _fetch(url, headers, timeout, read):
+    """GET with retries for busy servers (HTTP 429/5xx) and timeouts. Other errors are raised at once."""
+    if not url.startswith("https://"):
+        raise ValueError("refusing non-https URL")
+    attempt = 0
+    while True:
+        req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": USER_AGENT}))
         try:
-            os.remove(fn)
-        except OSError:
-            pass
-
-
-def move_artist_picture(old, new):
-    if not old or not new or artist_slug(old) == artist_slug(new):
-        return
-    src, dst = artist_files(old), artist_files(new)
-    if os.path.exists(src[0]) and not os.path.exists(dst[0]):
-        for a, b in zip(src, dst):
-            try:
-                os.replace(a, b)
-            except OSError:
-                pass
-
-
-def avatar_surface(pb, size, scale):
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size * scale, size * scale)
-    surf.set_device_scale(scale, scale)
-    cr = cairo.Context(surf)
-    cr.arc(size / 2.0, size / 2.0, size / 2.0, 0, 2 * math.pi)
-    cr.clip()
-    cr.scale(size / float(pb.get_width()), size / float(pb.get_height()))
-    Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
-    cr.get_source().set_filter(cairo.FILTER_GOOD)
-    cr.paint()
-    return surf
-
-
-def initials_surface(name, size, bg, fg, scale):
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size * scale, size * scale)
-    surf.set_device_scale(scale, scale)
-    cr = cairo.Context(surf)
-    cr.arc(size / 2.0, size / 2.0, size / 2.0, 0, 2 * math.pi)
-    cr.set_source_rgb(*_hex_rgb(bg))
-    cr.fill()
-    words = [w for w in re.split(r"\s+", name.strip()) if w and w.casefold() not in ("the", "a", "and", "&")]
-    letter = (words[0][0] if words else "?").upper()
-    layout = PangoCairo.create_layout(cr)
-    layout.set_font_description(Pango.FontDescription("Sans Bold %d" % int(size * 0.38)))
-    layout.set_text(letter, -1)
-    _ink, logical = layout.get_pixel_extents()
-    cr.move_to((size - logical.width) / 2.0 - logical.x, (size - logical.height) / 2.0 - logical.y)
-    cr.set_source_rgb(*_hex_rgb(fg))
-    PangoCairo.show_layout(cr, layout)
-    return surf
+            with _OPENER.open(req, timeout=timeout) as r:
+                return read(r)
+        except urllib.error.HTTPError as e:
+            if e.code not in RETRY_CODES or attempt >= len(RETRY_DELAYS):
+                raise
+            if "musicbrainz.org" in url:
+                MB_GAP[0] = 2.0   # be gentler for the rest of the session
+            wait = _retry_wait(e, attempt)
+        except (TimeoutError, OSError) as e:
+            reason = getattr(e, "reason", e)
+            timed_out = isinstance(reason, TimeoutError) or "timed out" in str(reason)
+            if not timed_out or attempt >= len(RETRY_DELAYS):
+                raise
+            wait = RETRY_DELAYS[attempt]
+        print("player163: %s is busy, retrying in %ds" % (urllib.parse.urlparse(url).hostname, wait), file=sys.stderr)
+        time.sleep(wait)
+        attempt += 1
 
 
 def _http_json(url):
-    if not url.startswith("https://"):
-        raise ValueError("refusing non-https URL")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read(2 * 1024 * 1024).decode("utf-8"))
+    return _fetch(url, {"Accept": "application/json"}, 15,
+                  lambda r: json.loads(r.read(2 * 1024 * 1024).decode("utf-8")))
 
 
 def _http_bytes(url):
-    if not url.startswith("https://"):
-        raise ValueError("refusing non-https URL")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        data = r.read(MAX_COVER_BYTES + 1)
+    data = _fetch(url, {}, 20, lambda r: r.read(MAX_COVER_BYTES + 1))
     return data if len(data) <= MAX_COVER_BYTES else None
 
 
-def _plain(htmltext, limit=120):
-    t = html.unescape(re.sub(r"<[^>]+>", " ", htmltext or ""))
-    t = " ".join(t.split())
-    return t if len(t) <= limit else t[:limit - 1] + "…"
+class CoverFinder:
+    """Background cover lookups, one at a time, never more than one request per second to MusicBrainz:
+    MusicBrainz (album → release group) → Cover Art Archive (front cover)."""
 
-
-class OnlineArtFinder:
-    """Background lookups, one at a time, never more than one request per second to MusicBrainz:
-    artist photos:  MusicBrainz (artist → Wikidata id) → Wikidata (image) → Wikimedia Commons (file + credit)
-    album covers:   MusicBrainz (album → release group) → Cover Art Archive (front cover)"""
-
-    def __init__(self, on_result, on_album=None):
-        self.on_result = on_result
+    def __init__(self, on_album):
         self.on_album = on_album
         self.q = queue.Queue()
         self.pending = set()  # touched only from the main thread
         self._last_mb = 0.0
         threading.Thread(target=self._run, daemon=True).start()
-
-    def request(self, name):
-        if name not in self.pending:
-            self.pending.add(name)
-            self.q.put(("artist", name, None, None))
 
     def request_album(self, key, album, artist):
         tag = "album:" + key
@@ -784,80 +743,23 @@ class OnlineArtFinder:
         return None
 
     def _mb(self, url):
-        wait = 1.1 - (time.monotonic() - self._last_mb)
+        wait = MB_GAP[0] - (time.monotonic() - self._last_mb)
         if wait > 0:
             time.sleep(wait)
         self._last_mb = time.monotonic()
         return _http_json(url)
 
-    def find(self, name):
-        query = 'artist:"%s"' % name.replace('"', " ").replace("\\", " ")
-        res = self._mb("https://musicbrainz.org/ws/2/artist/?" +
-                       urllib.parse.urlencode({"query": query, "fmt": "json", "limit": 5}))
-        want = name.casefold().strip()
-        match = None
-        for a in res.get("artists", []):
-            names = [a.get("name", "")] + [al.get("name", "") for al in a.get("aliases", []) or []]
-            if int(a.get("score", 0)) >= 90 and want in (n.casefold().strip() for n in names):
-                match = a
-                break
-        if not match or not re.match(r"^[0-9a-f-]{36}$", match.get("id", "")):
-            return None
-        rels = self._mb("https://musicbrainz.org/ws/2/artist/%s?inc=url-rels&fmt=json" % match["id"])
-        qid = None
-        for rel in rels.get("relations", []):
-            if rel.get("type") == "wikidata":
-                qid = (rel.get("url") or {}).get("resource", "").rstrip("/").split("/")[-1]
-        if not qid or not re.match(r"^Q\d+$", qid):
-            return None
-        ent = _http_json("https://www.wikidata.org/wiki/Special:EntityData/%s.json" % qid)
-        entity = next(iter(ent.get("entities", {}).values()), {})
-        p18 = entity.get("claims", {}).get("P18") or []
-        try:
-            fname = p18[0]["mainsnak"]["datavalue"]["value"]
-        except (KeyError, IndexError, TypeError):
-            return None
-        data, ii, last_err = None, {}, None
-        for width in WIKIMEDIA_WIDTHS:
-            info = _http_json("https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode({
-                "action": "query", "format": "json", "prop": "imageinfo", "titles": "File:" + fname,
-                "iiprop": "url|extmetadata", "iiurlwidth": width,
-                "iiextmetadatafilter": "Artist|LicenseShortName"}))
-            page = next(iter(info.get("query", {}).get("pages", {}).values()), {})
-            ii = (page.get("imageinfo") or [{}])[0]
-            url = ii.get("thumburl") or ii.get("url") or ""
-            if not url.startswith("https://upload.wikimedia.org/"):
-                return None
-            try:
-                data = _http_bytes(url)
-            except urllib.error.HTTPError as e:  # e.g. 429 "use thumbnail steps": try the next standard size
-                last_err = e
-                continue
-            if data:
-                break
-        if not data:
-            if last_err is not None:
-                raise last_err
-            return None
-        em = ii.get("extmetadata", {})
-        return {"data": data, "source": "commons", "author": _plain(em.get("Artist", {}).get("value", "")),
-                "license": _plain(em.get("LicenseShortName", {}).get("value", ""), 40),
-                "page": ii.get("descriptionurl", ""), "mbid": match["id"]}
-
     def _run(self):
         while True:
-            kind, name, album, artist = self.q.get()
+            _kind, key, album, artist = self.q.get()
             err = None
             try:
-                res = self.find(name) if kind == "artist" else self.find_album(album, artist)
+                res = self.find_album(album, artist)
                 ok = True
-            except Exception as e:  # offline, timeout, service hiccup: try again next session
-                print("player163: %s lookup failed for %r: %s" % (kind, album or name, e), file=sys.stderr)
+            except Exception as e:  # offline, timeout, service hiccup: try again later
+                print("player163: cover lookup failed for %r: %s" % (album, e), file=sys.stderr)
                 res, ok, err = None, False, (str(e) or e.__class__.__name__)
-            if kind == "artist":
-                GLib.idle_add(self.on_result, name, res, ok, err)
-            elif self.on_album is not None:
-                GLib.idle_add(self.on_album, name, res, ok, err)
+            GLib.idle_add(self.on_album, key, res, ok, err)
 
 
 # ----------------------------------------------------------------------------------------
@@ -1660,7 +1562,8 @@ class Mpris:
                 if tid == self.track_id(w.current_path):
                     w.seek_to(pos / 1e6)
             elif method == "OpenUri":
-                p = Gio.File.new_for_uri(params.unpack()[0]).get_path()
+                uri = params.unpack()[0]
+                p = Gio.File.new_for_uri(uri).get_path() if uri.startswith("file://") else None
                 if p:
                     w.open_paths([p])
         except Exception as e:
@@ -2034,9 +1937,17 @@ entry.search, headerbar entry { border-radius: 999px; padding-left: 10px; paddin
 treeview.view header button { border-radius: 0; }
 popover, popover.background { border-radius: 12px; }
 menu, .menu, .context-menu { border-radius: 10px; }
-switch { border-radius: 999px; }
-switch slider { border-radius: 999px; }
-switch:checked { background-color: @p_accent; border-color: @p_accent; color: @p_accent_fg; }
+/* Switches drawn entirely by player163: no theme images (Mint-Y's on/off glyphs), no theme accent color */
+switch { background-image: none; background-color: @p_border; border: 1px solid @p_border; border-radius: 999px;
+         box-shadow: none; outline: none; color: transparent; font-size: 0; min-width: 44px; min-height: 24px;
+         padding: 0; }
+switch:checked { background-image: none; background-color: @p_accent; border-color: @p_accent; }
+switch:disabled { opacity: 0.5; }
+switch image { -gtk-icon-source: none; color: transparent; opacity: 0; }
+switch slider { background-image: none; background-color: #ffffff; border: 1px solid rgba(0,0,0,0.15);
+                border-radius: 999px; box-shadow: 0 1px 2px rgba(0,0,0,0.35); min-width: 22px; min-height: 22px;
+                margin: 0; outline: none; }
+switch:checked slider { border-color: rgba(0,0,0,0.25); }
 iconview { background-color: @p_bg; color: @p_fg; }
 iconview:selected, iconview:selected:focus { background-color: @p_accent; color: @p_accent_fg; border-radius: 12px; }
 """
@@ -2547,8 +2458,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.small_thumbs = {}       # album key -> surface (False = no art)
         self.big_thumbs = {}
         self._album_rep = {}         # album key -> path of its first track
-        self.artist_avatars = {}     # artist name -> cairo surface (photo or initial)
-        self._photo_tried = set()    # lookups done this session
         self.album_layout = self.cfg.get("album_layout", "list") if self.cfg.get("album_layout") in ("list", "grid") else "list"
         self._album_gain = {}        # album key -> combined measured gain (dB)
         self._eq_dialog = None
@@ -2585,17 +2494,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mode_buttons[self.mode].set_active(True)
         self._apply_mode_visibility()
         self.err_bar.hide()
-        self.photo_bar.hide()
         self.cover_bar.hide()
         self.undo_bar.hide()
         self.scan_spinner.hide()
         self._ready = True
         self.tray = TrayIcon(self)
+        if self.cfg.pop("artist_photos", None) is not None or os.path.isdir(ARTIST_DIR):
+            shutil.rmtree(ARTIST_DIR, ignore_errors=True)   # artist pictures were removed in 1.7.1
         if self.cfg.get("tray", True):
             self.tray.set_visible(True)
         if float(self.cfg.get("text_scale", 1.0)) != 1.0:
             self.apply_text_scale(float(self.cfg.get("text_scale", 1.0)))
-        GLib.idle_add(lambda: self._maybe_ask_photos() and False)
+        GLib.idle_add(lambda: self._maybe_ask_covers() and False)
         if self.cfg.get("upnext_open"):
             self.upnext_btn.set_active(True)
 
@@ -2631,8 +2541,6 @@ class MainWindow(Gtk.ApplicationWindow):
         Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", scheme == "dark")
         self._css.load_from_data(build_css(scheme))
         self._render_thumbs()
-        if hasattr(self, "artist_avatars"):
-            self.artist_avatars.clear()
         if hasattr(self, "fav_btn"):
             self.update_fav_buttons()
         if hasattr(self, "upnext_btn") and self._thumbs.get("queue") is not None:
@@ -2728,7 +2636,6 @@ class MainWindow(Gtk.ApplicationWindow):
         sec_theme = Gio.Menu()
         sec_theme.append("Dark Theme", "win.theme::dark")
         sec_theme.append("Light Theme", "win.theme::light")
-        sec_theme.append("Artist Photos from Wikimedia", "win.artist-photos")
         sec_theme.append("Album Covers from Cover Art Archive", "win.album-covers")
         menu.append_section(None, sec_theme)
         sec2.append("Preferences", "win.preferences")
@@ -2753,18 +2660,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.err_bar.get_content_area().add(self.err_label)
         self.err_bar.connect("response", lambda b, r: b.hide())
         outer.pack_start(self.err_bar, False, False, 0)
-
-        self.photo_bar = Gtk.InfoBar(message_type=Gtk.MessageType.QUESTION, show_close_button=False)
-        pl = Gtk.Label(xalign=0, wrap=True)
-        pl.set_markup("<b>Show artist photos?</b>  player163 can look up your artists' names on MusicBrainz and "
-                      "Wikidata and download free photos from Wikimedia Commons. You can also set your own pictures "
-                      "(right-click an artist).")
-        self.photo_bar.get_content_area().add(pl)
-        self.photo_bar.add_button("No Thanks", 0)
-        yes = self.photo_bar.add_button("Show Photos", 1)
-        yes.get_style_context().add_class("suggested-action")
-        self.photo_bar.connect("response", lambda b, r: self.set_artist_photos(r == 1))
-        outer.pack_start(self.photo_bar, False, False, 0)
 
         self.cover_bar = Gtk.InfoBar(message_type=Gtk.MessageType.QUESTION, show_close_button=False)
         cl = Gtk.Label(xalign=0, wrap=True)
@@ -2871,10 +2766,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._big_loader = ThumbLoader(GRID_THUMB, sf, self._big_thumb_ready)
         self.group_view.get_selection().connect("changed", self._on_group_changed)
         self.group_view.connect("button-press-event", self._on_group_button)
-        self.group_view.set_has_tooltip(True)
-        self.group_view.connect("query-tooltip", self._group_tooltip)
-        self.photo_finder = OnlineArtFinder(self._photo_ready, self._cover_ready)
+        self.photo_finder = CoverFinder(self._cover_ready)
         self._cover_tried = set()
+        self._lookup_retries = {}
+        self._lookup_err_shown = set()
         self.group_view.connect("row-activated", lambda *a: self.play_visible(None))
         sscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         sscroll.add(self.group_view)
@@ -3337,9 +3232,6 @@ class MainWindow(Gtk.ApplicationWindow):
         add("export-favs", self.export_favorites)
         add("clear-queue", self.clear_queue)
         add("upnext", lambda: self.upnext_btn.set_active(not self.upnext_btn.get_active()), ["<Primary>u"])
-        ap = Gio.SimpleAction.new_stateful("artist-photos", None, GLib.Variant("b", self._photos_online()))
-        ap.connect("activate", lambda a, v: self.set_artist_photos(not a.get_state().get_boolean()))
-        self.add_action(ap)
         ac = Gio.SimpleAction.new_stateful("album-covers", None, GLib.Variant("b", self._covers_online()))
         ac.connect("activate", lambda a, v: self.set_album_covers(not a.get_state().get_boolean()))
         self.add_action(ac)
@@ -3387,7 +3279,7 @@ class MainWindow(Gtk.ApplicationWindow):
         cell.set_property("surface", self._thumbs["list_" + ("on" if on else "off") + ("_sel" if sel else "")])
 
     def _cell_group_thumb(self, col, cell, model, it, data):
-        if self.mode not in ("albums", "artists"):
+        if self.mode != "albums":
             cell.set_visible(False)
             return
         cell.set_visible(True)
@@ -3395,61 +3287,23 @@ class MainWindow(Gtk.ApplicationWindow):
         if key == ALL_KEY:
             cell.set_property("surface", self._blank_thumb)
             return
-        if self.mode == "artists":
-            cell.set_property("surface", self.artist_avatar(key))
-            return
         e = self.album_thumbs.get(key)
         cell.set_property("surface", e[1] if e and e[1] is not None else self._album_placeholder)
 
-    # ---------------------------------------------------------------- artist pictures
-    def _photos_online(self):
-        return self.cfg.get("artist_photos") is True
-
-    def artist_avatar(self, name):
-        surf = self.artist_avatars.get(name)
-        if surf is not None:
-            return surf
-        sf = max(1, self.get_scale_factor())
-        surf = None
-        if name != UNKNOWN_ARTIST:
-            png = artist_files(name)[0]
-            if os.path.exists(png):
-                try:
-                    surf = avatar_surface(GdkPixbuf.Pixbuf.new_from_file(png), AVATAR, sf)
-                except Exception:
-                    surf = None
-            if surf is None and self._photos_online() and name not in self._photo_tried:
-                meta = artist_meta(name)
-                recent_miss = meta and meta.get("source") == "none" and time.time() - meta.get("fetched", 0) < 30 * 86400
-                if not recent_miss:
-                    self._photo_tried.add(name)
-                    self.photo_finder.request(name)
-        if surf is None:
-            dark = self.scheme == "dark"
-            surf = initials_surface(name if name != UNKNOWN_ARTIST else "?", AVATAR,
-                                    "#262626" if dark else "#e6e6e1", "#8c8c8c" if dark else "#8a8a84", sf)
-        self.artist_avatars[name] = surf
-        return surf
-
-    def _photo_ready(self, name, res, ok, err=None):
-        self.photo_finder.pending.discard(name)
-        if not ok and not getattr(self, "_photo_err_shown", False):
-            self._photo_err_shown = True  # say it once per session instead of failing silently
-            self.show_error("Couldn't download artist photos right now (%s). player163 will try again "
-                            "next time you open it." % err)
-        meta = artist_meta(name)
-        if meta and meta.get("source") == "custom":
-            return False  # the user picked their own meanwhile
-        if res:
-            data = res.pop("data")
-            if not save_artist_picture(name, data, res):
-                mark_artist_missing(name)
-        elif ok:
-            mark_artist_missing(name)
-        self.artist_avatars.pop(name, None)
-        if self.mode == "artists":
-            self.group_view.queue_draw()
-        return False
+    def _lookup_failed(self, tag, retry, err, what):
+        """A lookup still failed after its quick retries: try again in a minute (twice), then say so once."""
+        busy = any(code in (err or "") for code in ("429", "500", "502", "503", "504"))
+        n = self._lookup_retries.get(tag, 0)
+        if busy and n < 2:
+            self._lookup_retries[tag] = n + 1
+            GLib.timeout_add_seconds(int(60 * (n + 1) * LOOKUP_RETRY_SCALE), lambda: retry() and False)
+            return
+        if what in self._lookup_err_shown:
+            return
+        self._lookup_err_shown.add(what)
+        why = "the service is busy right now" if busy else "you may be offline"
+        self.show_error("Some %s couldn't be downloaded (%s: %s). player163 will try again next time you open it."
+                        % (what, why, err))
 
     # ---------------------------------------------------------------- album covers (local + online)
     def _covers_online(self):
@@ -3474,16 +3328,15 @@ class MainWindow(Gtk.ApplicationWindow):
     def _cover_ready(self, key, res, ok, err=None):
         self.photo_finder.pending.discard("album:" + key)
         if not ok:
-            if not getattr(self, "_cover_err_shown", False):
-                self._cover_err_shown = True
-                self.show_error("Couldn't download album covers right now (%s). player163 will try again "
-                                "next time you open it." % err)
+            album, _sep, artist = key.partition("\x1f")
+            self._lookup_failed("album:" + key, lambda: self.photo_finder.request_album(key, album, artist),
+                                err, "album covers")
             return False
         meta = cover_meta(key)
         if meta and meta.get("source") == "custom":
             return False
         if res:
-            data = normalize_cover(res.pop("data"), 600)
+            data = normalize_cover(res.pop("data"), 600, reencode=True)
             if data is None:
                 save_stored_cover(key, None, {"source": "none"})
             else:
@@ -3590,75 +3443,6 @@ class MainWindow(Gtk.ApplicationWindow):
         save_stored_cover(key, None, None)
         self._cover_tried.discard(key)
         self._cover_changed(key)
-
-    def set_artist_picture(self, name, fn=None):
-        fn = fn or self._choose_image("Choose a picture for %s" % name)
-        if not fn:
-            return
-        try:
-            if os.path.getsize(fn) > MAX_COVER_BYTES:
-                raise ValueError("file is too large")
-            with open(fn, "rb") as f:
-                ok = save_artist_picture(name, f.read(), {"source": "custom"})
-        except Exception as e:
-            ok = False
-            print("player163: artist picture:", e, file=sys.stderr)
-        if not ok:
-            self.show_error("Couldn't use that picture. Try a JPEG or PNG image.")
-        self.artist_avatars.pop(name, None)
-        self.group_view.queue_draw()
-
-    def _hide_online_photo(self, name):
-        """Wrong person or a photo you don't like: drop it and don't fetch it again."""
-        mark_artist_missing(name)
-        meta = artist_meta(name) or {}
-        meta["fetched"] = time.time() + 3650 * 86400
-        with open(artist_files(name)[1], "w", encoding="utf-8") as f:
-            json.dump(meta, f)
-        self.artist_avatars.pop(name, None)
-        self.group_view.queue_draw()
-
-    def reset_artist_picture(self, name):
-        """Remove the custom/online picture; look it up online again if photos are on."""
-        remove_artist_picture(name)
-        self._photo_tried.discard(name)
-        self.artist_avatars.pop(name, None)
-        self.group_view.queue_draw()
-
-    def set_artist_photos(self, on):
-        self.cfg["artist_photos"] = bool(on)
-        self.photo_bar.hide()
-        self.cover_bar.hide()
-        self.undo_bar.hide()
-        self._photo_tried.clear()
-        self.artist_avatars.clear()
-        self.group_view.queue_draw()
-        act = self.lookup_action("artist-photos")
-        if act is not None:
-            act.set_state(GLib.Variant("b", bool(on)))
-
-    def _maybe_ask_photos(self):
-        if self.mode == "artists" and self.cfg.get("artist_photos") is None and self.library.tracks:
-            self.photo_bar.show()
-        self._maybe_ask_covers()
-
-    def _group_tooltip(self, view, x, y, keyboard, tooltip):
-        if self.mode != "artists":
-            return False
-        ok, x2, y2, model, path, it = view.get_tooltip_context(x, y, keyboard)
-        if not ok:
-            return False
-        name = model.get_value(it, 0)
-        meta = artist_meta(name) if name != ALL_KEY else None
-        if not meta or meta.get("source") not in ("commons", "custom"):
-            return False
-        if meta["source"] == "custom":
-            tooltip.set_text("Your picture")
-        else:
-            bits = [b for b in (meta.get("author"), meta.get("license")) if b]
-            tooltip.set_text("Photo: %s · Wikimedia Commons" % " · ".join(bits) if bits else "Photo from Wikimedia Commons")
-        view.set_tooltip_row(tooltip, path)
-        return True
 
     def _clear_thumbs(self):
         self.album_thumbs.clear()
@@ -4234,7 +4018,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._apply_mode_visibility()
         self.cfg["mode"] = key
         self.refresh_all()
-        self._maybe_ask_photos()
+        self._maybe_ask_covers()
 
     def _on_group_changed(self, sel):
         if self._building_groups:
@@ -4360,33 +4144,27 @@ class MainWindow(Gtk.ApplicationWindow):
         if image and widget is not self:
             key = self._drop_key(widget, x, y)
             if key is not None:
-                kind, k = key
-                if kind == "artist":
-                    self.set_artist_picture(k, paths[0])
-                else:
-                    self.set_album_cover(k, paths[0])
+                self.set_album_cover(key[1], paths[0])
                 return
         if image:
-            self.flash_status("Drop a picture on an album (or an artist) to use it as its cover.", 6)
+            self.flash_status("Drop a picture on an album to use it as its cover.", 6)
             return
         self.open_paths(paths)
 
     def _drop_key(self, widget, x, y):
-        """Which album (or artist) an image was dropped on."""
+        """Which album an image was dropped on."""
         if widget is self.art_ev:
             t = self.get_track(self.current_path) if self.current_path else None
             return ("album", t["album_key"]) if t and t["album"] else None
         if widget is self.grid_view:
             tp = widget.get_path_at_pos(*widget.convert_widget_to_bin_window_coords(x, y))
             return ("album", self.grid_store[tp][0]) if tp is not None else None
-        if widget is self.group_view and self.mode in ("albums", "artists"):
+        if widget is self.group_view and self.mode == "albums":
             hit = widget.get_path_at_pos(*widget.convert_widget_to_bin_window_coords(x, y))
             if not hit:
                 return None
             key = self.group_store[hit[0]][0]
-            if key == ALL_KEY or (self.mode == "artists" and key == UNKNOWN_ARTIST):
-                return None
-            return ("artist" if self.mode == "artists" else "album", key)
+            return None if key == ALL_KEY else ("album", key)
         return None
 
     def start_scan(self, quiet=False):
@@ -5165,7 +4943,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def clear_downloaded_pictures(self):
         n = 0
-        for d in (ARTIST_DIR, COVER_DIR):
+        for d in (COVER_DIR,):
             try:
                 names = os.listdir(d)
             except OSError:
@@ -5186,14 +4964,12 @@ class MainWindow(Gtk.ApplicationWindow):
                         n += ext != ".json"
                     except OSError:
                         pass
-        self._photo_tried.clear()
         self._cover_tried.clear()
-        self.artist_avatars.clear()
         self._clear_thumbs()
         self.refresh_all(keep_scroll=True)
         if self.current_path:
             self._show_now_playing(self.current_path)
-        self.flash_status("Removed %d downloaded picture%s." % (n, "" if n == 1 else "s"))
+        self.flash_status("Removed %d downloaded cover%s." % (n, "" if n == 1 else "s"))
 
     def toggle_visible(self):
         win = self.mini if self.cfg.get("compact") else self
@@ -5222,8 +4998,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _notify(self, title, body, icon_file, nid="now-playing"):
         try:
-            n = Gio.Notification.new(title)
-            n.set_body(body)
+            n = Gio.Notification.new(esc(title))   # some notification servers read markup
+            n.set_body(esc(body))
             if icon_file:
                 n.set_icon(Gio.FileIcon.new(Gio.File.new_for_path(icon_file)))
             else:
@@ -5280,9 +5056,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 for dp, dn, fns in os.walk(p):
                     dn.sort()
                     files += [os.path.join(dp, f) for f in sorted(fns) if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
-            elif os.path.isfile(p):
+            elif os.path.isfile(p) and os.path.splitext(p)[1].lower() in AUDIO_EXTS:
                 files.append(p)
         if not files:
+            if paths:
+                self.flash_status("That isn't a music file player163 can play.", 5)
             return
         for f in files:
             if f not in self.library.tracks and f not in self.extra:
@@ -5390,20 +5168,6 @@ class MainWindow(Gtk.ApplicationWindow):
             menu.append(Gtk.SeparatorMenuItem())
             if self.mode == "artists":
                 self._menu_item(menu, "Rename Artist…", lambda: self.rename_artist(key))
-                if key != UNKNOWN_ARTIST:
-                    menu.append(Gtk.SeparatorMenuItem())
-                    meta = artist_meta(key) or {}
-                    self._menu_item(menu, "Set Artist Picture…", lambda: self.set_artist_picture(key))
-                    if meta.get("source") == "custom":
-                        self._menu_item(menu, "Remove My Picture", lambda: self.reset_artist_picture(key))
-                    elif meta.get("source") == "commons":
-                        page = meta.get("page", "")
-                        if page.startswith("https://commons.wikimedia.org/"):
-                            self._menu_item(menu, "About This Photo",
-                                            lambda: Gio.AppInfo.launch_default_for_uri(page, None))
-                        self._menu_item(menu, "Remove This Photo", lambda: self._hide_online_photo(key))
-                    elif self._photos_online():
-                        self._menu_item(menu, "Look for a Photo Again", lambda: self.reset_artist_picture(key))
                 menu.append(Gtk.SeparatorMenuItem())
             else:
                 self._menu_item(menu, "Rename Album…", lambda: self.rename_album(key))
@@ -5507,11 +5271,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 ch["albumartist"] = new
             if ch:
                 jobs.append((t["path"], ch))
-        move_artist_picture(old or key, new)
-        self.artist_avatars.pop(key, None)
-        self.artist_avatars.pop(new, None)
         self.group_sel = new
-        self._write_jobs(jobs, label="Renamed “%s” to “%s”" % (key, new), pic_moves=[(new, old or key)])
+        self._write_jobs(jobs, label="Renamed “%s” to “%s”" % (key, new))
 
     def rename_album(self, key):
         tracks = [t for t in self.library.tracks.values() if t["album_key"] == key]
@@ -5535,7 +5296,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._write_jobs([(t["path"], {"album": new}) for t in tracks],
                          label="Renamed album to “%s”" % new, covers=covers)
 
-    def _write_jobs(self, jobs, label=None, undo=False, covers=None, pic_moves=None):
+    def _write_jobs(self, jobs, label=None, undo=False, covers=None):
         """jobs: (path, {tag: value}) or (path, {tag: value}, cover_op) with cover_op ("set", data, mime)
         or ("remove",). Remembers the old values so the change can be undone."""
         if not jobs:
@@ -5567,11 +5328,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 except Exception as e:
                     errors.append((path, str(e) or e.__class__.__name__))
                 done.append(track_from_file(path))
-            GLib.idle_add(self._write_done, done, errors, back, label, undo, covers, pic_moves)
+            GLib.idle_add(self._write_done, done, errors, back, label, undo, covers)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _write_done(self, tracks, errors, back=(), label=None, undo=False, covers=None, pic_moves=None):
+    def _write_done(self, tracks, errors, back=(), label=None, undo=False, covers=None):
         self._writing = False
         self._ignore_fs_until = time.monotonic() + 4
         self._clear_thumbs()
@@ -5596,7 +5357,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.flash_status("Undone.")
         elif back or covers:
             n = len(tracks)
-            self._undo = {"jobs": back, "covers": covers or {}, "pic_moves": pic_moves or []}
+            self._undo = {"jobs": back, "covers": covers or {}}
             text = label or "Saved changes to {:,} song{}".format(n, "" if n == 1 else "s")
             self.undo_label.set_text(text + ".")
             self.undo_bar.show()
@@ -5623,9 +5384,6 @@ class MainWindow(Gtk.ApplicationWindow):
         for key, (data, meta) in u["covers"].items():
             save_stored_cover(key, data, meta)
             self._cover_changed(key)
-        for new, old in u["pic_moves"]:
-            move_artist_picture(new, old)
-            self.artist_avatars.clear()
         if self._undo_hide_id:
             GLib.source_remove(self._undo_hide_id)
             self._undo_hide_id = 0
@@ -6002,18 +5760,16 @@ class SettingsDialog(Gtk.Window):
     def _online_page(self):
         m = self.main
         page, box = self._page()
-        self._heading(box, "Pictures from the internet")
-        self._switch(box, "Artist photos", "Free photos from Wikimedia Commons, found through MusicBrainz and Wikidata.",
-                     m._photos_online(), m.set_artist_photos)
+        self._heading(box, "Album covers from the internet")
         self._switch(box, "Missing album covers", "From the Cover Art Archive, found through MusicBrainz. "
                      "Your files aren't changed.", m._covers_online(), m.set_album_covers)
         clear = Gtk.Button(label="Clear")
         clear.connect("clicked", lambda *_: m.clear_downloaded_pictures())
-        self._row(box, "Downloaded pictures", "Removes photos and covers player163 downloaded. "
-                  "Pictures you chose yourself stay.", clear)
+        self._row(box, "Downloaded covers", "Removes the covers player163 downloaded. "
+                  "Covers you set yourself stay.", clear)
         note = Gtk.Label(xalign=0, wrap=True, margin_top=12)
-        note.set_markup("<small>Only artist and album names are sent, one request per second. Nothing is "
-                        "looked up while these are off.</small>")
+        note.set_markup("<small>Only album and artist names are sent, one request per second. Nothing is "
+                        "looked up while this is off.</small>")
         note.get_style_context().add_class("dim-label")
         box.pack_start(note, False, False, 0)
         return page

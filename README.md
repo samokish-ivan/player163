@@ -6,7 +6,7 @@ A small, no-fuss music player for Linux Mint (and Ubuntu / Debian).
 
 | Album grid, light theme | Artists |
 | --- | --- |
-| ![Album grid in the light theme](screenshots/2-album-grid-light.png) | ![Artists view with album art](screenshots/3-artists-dark.png) |
+| ![Album grid in the light theme](screenshots/2-album-grid-light.png) | ![Artists view](screenshots/3-artists-dark.png) |
 
 | Player on the side, with Up Next | Playlists, light theme |
 | --- | --- |
@@ -78,14 +78,6 @@ Albums with no cover at all can be filled in from the internet: the first time y
 player163 asks. If you agree, album and artist **names** are looked up on MusicBrainz and the front
 cover is downloaded from the Cover Art Archive. Downloaded covers are kept by player163 and don't
 change your files. Right-click an album → *Find Cover Online* to try one album by hand.
-
-### Artist pictures
-
-Right-click an artist → **Set Artist Picture…** to use your own image. You can also let player163
-find free photos: the first time you open Artists it asks, and you can change your mind in
-Preferences → Online. You can also drop an image on an artist. When it's on, your artists' **names** (nothing else) are looked up
-on MusicBrainz and Wikidata, and freely licensed photos are downloaded from Wikimedia Commons. Hover a
-photo to see who took it and its license.
 
 ### Sound
 
@@ -168,11 +160,21 @@ For the rarer formats, also install: `sudo apt install gstreamer1.0-plugins-bad 
 
 Keyboard media keys and the Cinnamon sound applet work too (MPRIS).
 
+## Privacy and security
+
+- **No tracking, no accounts, no ads.** player163 never sends anything about you or your listening anywhere.
+- It only goes online if you turn on **missing album covers**. Then it sends album and artist names
+  (nothing else) to MusicBrainz and the Cover Art Archive, over HTTPS only, at most one request a second.
+- Downloaded covers are decoded and re-saved as plain images, so nothing hidden inside a downloaded file is kept.
+- Only audio files are ever played; anything else you drop on the window or open is ignored. Song tags
+  are always shown as plain text. Oversized "image bombs" are refused before they're opened.
+- Updates come from the signed APT repository: `apt` refuses any package that isn't signed with the
+  player163 key.
+
 ## Files
 
 - Settings: `~/.config/player163/config.json`
 - Library cache: `~/.local/share/player163/library.db` (safe to delete; it rebuilds)
-- Artist pictures: `~/.local/share/player163/artists/`
 - Album covers set in player163 or downloaded: `~/.local/share/player163/covers/`
 
 ## Rebuild the .deb

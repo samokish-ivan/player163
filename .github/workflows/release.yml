@@ -22,7 +22,9 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2, pinned to an exact commit
+        with:
+          persist-credentials: false   # the token isn't left in .git; the push below passes it explicitly
 
       - name: Install packaging tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq dpkg-dev apt-utils

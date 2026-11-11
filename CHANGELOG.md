@@ -2,6 +2,23 @@
 
 All notable changes to player163. Newest first.
 
+## [1.7.1] — 2026-11-11
+
+### Changed
+- **Artist pictures are gone**: the Artists list is now a clean list of names with song and album counts. Album covers stay. Pictures saved by earlier versions are cleaned up.
+- **Missing album covers cope with busy servers**: when MusicBrainz or the Cover Art Archive answers "busy" (HTTP 503 and similar), player163 waits and tries again, slows down, and retries the album later in the same session instead of giving up right away.
+
+### Fixed
+- Switches in Preferences and the Equalizer looked broken with some themes (e.g. Mint-Y showed a line through the on mark and its own accent color). They're now drawn in player163's own black and yellow style.
+
+### Security
+- Online lookups use HTTPS only, including redirects; plain http, file and ftp addresses are refused.
+- Downloaded covers are decoded and re-encoded, so only the picture itself is kept.
+- Only audio files are passed to the decoders (files dropped or opened, and the MPRIS "open" command, which now only accepts local files).
+- Song titles in notifications are plain text, never markup.
+- A damaged or hand-edited settings file can't break the app: unexpected values are ignored.
+- The release workflow uses its GitHub Action pinned to an exact commit and doesn't leave its token on disk.
+
 ## [1.7.0] — 2026-11-11
 
 Includes the 1.6.1 artist-photo fix.
