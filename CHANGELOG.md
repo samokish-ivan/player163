@@ -2,6 +2,22 @@
 
 All notable changes to player163. Newest first.
 
+## [1.5.0] — 2026-11-11
+
+### Added
+- **Album art everywhere**: a small cover next to each album name in every song list, and each artist in the Artists list shows the cover of their newest album.
+- **Album grid**: in Albums, switch between the list and a big cover-art grid (buttons next to rescan). Click a cover to open the album; right-click to play it, queue it, rename it or edit its tags.
+- **Play Next / Add to Queue**: right-click songs, an artist or an album. Queued songs play before the rest and show their place (1, 2, 3…) in the list. *Clear Up Next* is in the right-click menu and the ☰ menu.
+- **Volume leveling** (☰ → Volume Leveling → Off / Per Song / Per Album; Per Album is the default): evens out loud and quiet songs. Uses the ReplayGain values already in your files, and quietly measures songs that don't have them in the background (once, then remembered). Never boosts a song past the point where it would clip.
+- **Equalizer** (☰ → Equalizer…, Ctrl+Shift+E): 10 bands with presets: Flat, Bass Boost, Treble Boost, Vocal, Rock, Pop, Jazz, Classical, Electronic, Late Night.
+- **New music shows up by itself**: songs you add, move or delete in your music folder appear in (or leave) the library within a few seconds, with no need to press F5.
+
+### Changed
+- Rounder, roomier look: all buttons are rounded whatever your system theme, and Songs / Artists / Albums / Favorites are separate spaced-out buttons.
+
+### Fixed
+- Playback (for example in shuffle) stopped when the next song had been moved, renamed or deleted since the last scan. Missing songs are now skipped, with a note saying which.
+
 ## [1.4.0] — 2026-11-11
 
 ### Added

@@ -4,13 +4,13 @@ A small, no-fuss music player for Linux Mint (and Ubuntu / Debian).
 
 ![player163 library in the dark theme](screenshots/1-library-dark.png)
 
-| Albums, light theme | Favorites |
+| Album grid, light theme | Artists |
 | --- | --- |
-| ![Albums view in the light theme](screenshots/2-albums-light.png) | ![Favorites view](screenshots/3-favorites-dark.png) |
+| ![Album grid in the light theme](screenshots/2-album-grid-light.png) | ![Artists view with album art](screenshots/3-artists-dark.png) |
 
-**Mini player**, dark and light:
-
-![Mini player in dark and light themes](screenshots/4-mini-player.png)
+| Equalizer | Mini player, dark and light |
+| --- | --- |
+| ![Equalizer](screenshots/5-equalizer.png) | ![Mini player](screenshots/4-mini-player.png) |
 
 ## Install
 
@@ -39,9 +39,17 @@ like any other update. To turn this off, disable the source in
 
 1. Click **Choose Music Folder…** and pick where your music lives. It scans it once;
    after that, starting the app or pressing **F5** only re-reads new or changed files.
+   New music you add to the folder shows up on its own within a few seconds.
 2. Switch between **Songs / Artists / Albums / Favorites** at the top. Just start typing to search.
-   The Albums list shows each album's cover art.
+   Albums can be shown as a list or a cover grid (buttons next to rescan).
 3. Double-click (or Enter) to play. The queue is whatever list you're looking at.
+4. Right-click songs (or an artist or album) for **Play Next** and **Add to Queue**.
+
+### Sound
+
+- **Volume leveling** (☰ → Volume Leveling): evens out loud and quiet songs, per song or per album.
+  It uses ReplayGain tags if your files have them and measures the rest in the background.
+- **Equalizer** (☰ → Equalizer…): 10 bands with presets.
 
 ### Fixing tags (typos etc.)
 
@@ -107,6 +115,7 @@ For the rarer formats, also install: `sudo apt install gstreamer1.0-plugins-bad 
 | Ctrl+4 | Favorites |
 | Ctrl+J | Jump to playing song |
 | Ctrl+M | Mini player ⇄ library |
+| Ctrl+Shift+E | Equalizer |
 | Ctrl+O / F5 | Choose folder / rescan |
 
 Keyboard media keys and the Cinnamon sound applet work too (MPRIS).

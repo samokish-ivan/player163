@@ -51,7 +51,7 @@ except ImportError:  # pragma: no cover
 
 APP_NAME = "player163"
 APP_ID = "com.smokyfish.Player163"
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "player163")
 DATA_DIR = os.path.join(GLib.get_user_data_dir(), "player163")
@@ -59,6 +59,9 @@ CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "player163")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
 ALBUM_THUMB = 40
+SMALL_THUMB = 18
+GRID_THUMB = 150
+MAX_WATCHED_DIRS = 8000
 
 AUDIO_EXTS = {
     ".mp3", ".mp2", ".flac", ".m4a", ".m4b", ".mp4", ".alac", ".aac", ".ogg", ".oga",
@@ -427,6 +430,142 @@ def pixbuf_from_bytes(data, size):
 
 
 # ----------------------------------------------------------------------------------------
+# Volume leveling (ReplayGain) and equalizer
+# ----------------------------------------------------------------------------------------
+
+EQ_LABELS = ("31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k")
+EQ_PRESETS = {
+    "Flat": (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+    "Bass Boost": (6, 5, 4, 2, 0, 0, 0, 0, 0, 0),
+    "Treble Boost": (0, 0, 0, 0, 0, 1, 2, 4, 5, 6),
+    "Vocal": (-2, -2, -1, 1, 3, 4, 3, 1, 0, -1),
+    "Rock": (4, 3, 2, 0, -1, -1, 1, 2, 3, 4),
+    "Pop": (-1, 1, 3, 4, 3, 1, 0, -1, -1, -1),
+    "Jazz": (3, 2, 1, 2, -1, -1, 0, 1, 2, 3),
+    "Classical": (3, 2, 1, 0, 0, 0, -1, -1, 1, 2),
+    "Electronic": (4, 3, 1, 0, -2, 1, 0, 1, 3, 4),
+    "Late Night": (-2, -1, 0, 1, 2, 2, 1, 0, -1, -2),
+}
+_RG_NUM = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+def _rg_float(v):
+    m = _RG_NUM.search(str(v))
+    return float(m.group(0)) if m else None
+
+
+def read_replaygain(path):
+    """ReplayGain/R128 values already stored in the file: (track_gain, track_peak, album_gain)."""
+    if mutagen is None:
+        return None
+    try:
+        f = mutagen.File(path)
+        tags = f.tags if f is not None else None
+        if tags is None:
+            return None
+        vals = {}
+        if isinstance(tags, ID3):
+            for fr in tags.getall("TXXX"):
+                vals[fr.desc.lower()] = str(fr.text[0]) if fr.text else ""
+        else:
+            for k, v in tags.items():
+                k2 = str(k).lower()
+                if k2.startswith("----:com.apple.itunes:"):
+                    k2 = k2.split(":")[-1]
+                if isinstance(v, list):
+                    v = v[0] if v else ""
+                if hasattr(v, "value"):
+                    v = v.value
+                if isinstance(v, (bytes, bytearray)):
+                    v = bytes(v).decode("utf-8", "ignore")
+                vals[k2] = str(v)
+    except Exception:
+        return None
+    tg = _rg_float(vals["replaygain_track_gain"]) if "replaygain_track_gain" in vals else None
+    ag = _rg_float(vals["replaygain_album_gain"]) if "replaygain_album_gain" in vals else None
+    pk = _rg_float(vals["replaygain_track_peak"]) if "replaygain_track_peak" in vals else None
+    try:  # Opus R128 gains are Q7.8 relative to -23 LUFS; ReplayGain's reference is ~5 dB louder
+        if tg is None and "r128_track_gain" in vals:
+            tg = int(vals["r128_track_gain"]) / 256.0 + 5.0
+        if ag is None and "r128_album_gain" in vals:
+            ag = int(vals["r128_album_gain"]) / 256.0 + 5.0
+    except ValueError:
+        pass
+    return tg, pk, ag
+
+
+def analyze_loudness(path):
+    """(track_gain, peak, album_gain, source). Uses tags if present, else measures the file."""
+    tags = read_replaygain(path)
+    if tags and tags[0] is not None:
+        return tags[0], tags[1], tags[2], "tag"
+    pipe = Gst.parse_launch("filesrc name=src ! decodebin ! audioconvert ! audioresample ! "
+                            "rganalysis name=rga ! fakesink sync=false")
+    pipe.get_by_name("src").set_property("location", path)
+    rga = pipe.get_by_name("rga")
+    found = {}
+
+    def probe(pad, info):  # rganalysis sends its result downstream as a tag event at the end
+        ev = info.get_event()
+        if ev is not None and ev.type == Gst.EventType.TAG:
+            tl = ev.parse_tag()
+            ok, g = tl.get_double("replaygain-track-gain")
+            if ok:
+                found["gain"] = g
+            ok, pk = tl.get_double("replaygain-track-peak")
+            if ok:
+                found["peak"] = pk
+        return Gst.PadProbeReturn.OK
+
+    rga.get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, probe)
+    bus = pipe.get_bus()
+    pipe.set_state(Gst.State.PLAYING)
+    deadline = time.monotonic() + 600
+    try:
+        while time.monotonic() < deadline:
+            msg = bus.timed_pop_filtered(2 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+            if msg is not None:
+                break
+    finally:
+        pipe.set_state(Gst.State.NULL)
+    if "gain" in found:
+        return found["gain"], found.get("peak"), None, "scan"
+    return None
+
+
+class LoudnessAnalyzer:
+    """Measures loudness of songs without ReplayGain tags, one at a time, at low priority."""
+
+    def __init__(self, on_result):
+        self.on_result = on_result
+        self.q = queue.Queue()
+        self.queued = set()  # touched only from the main thread
+        self.paused = False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, items):
+        for path, mtime in items:
+            if path not in self.queued:
+                self.queued.add(path)
+                self.q.put((path, mtime))
+
+    def _run(self):
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 15)
+        except Exception:
+            pass
+        while True:
+            path, mtime = self.q.get()
+            while self.paused:
+                time.sleep(1)
+            try:
+                res = analyze_loudness(path)
+            except Exception:
+                res = None
+            GLib.idle_add(self.on_result, path, mtime, res)
+
+
+# ----------------------------------------------------------------------------------------
 # Library (SQLite cache of the scanned folder)
 # ----------------------------------------------------------------------------------------
 
@@ -455,6 +594,17 @@ class Library:
         self.db.execute("CREATE TABLE IF NOT EXISTS favorites (path TEXT PRIMARY KEY, added REAL)")
         self.db.commit()
         self.favs = dict(self.db.execute("SELECT path, added FROM favorites"))
+        self.db.execute("CREATE TABLE IF NOT EXISTS loudness (path TEXT PRIMARY KEY, mtime REAL, "
+                        "track_gain REAL, peak REAL, album_gain REAL, source TEXT)")
+        self.db.commit()
+        self.loud = {r[0]: r[1:] for r in self.db.execute(
+            "SELECT path, mtime, track_gain, peak, album_gain, source FROM loudness")}
+
+    def set_loudness(self, path, mtime, tg, peak, ag, source):
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO loudness VALUES (?, ?, ?, ?, ?, ?)",
+                            (path, mtime, tg, peak, ag, source))
+        self.loud[path] = (mtime, tg, peak, ag, source)
 
     def set_favorite(self, paths, on):
         now = time.time()
@@ -505,6 +655,7 @@ def scan_worker(root, known, cancelled, on_batch, on_progress, on_done):
     """Runs in a thread. Callbacks are invoked through GLib.idle_add by the caller's wrappers."""
     files = []
     seen_dirs = set()
+    dirs = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         if cancelled():
             return
@@ -517,6 +668,7 @@ def scan_worker(root, known, cancelled, on_batch, on_progress, on_done):
             dirnames[:] = []
             continue
         seen_dirs.add((st.st_dev, st.st_ino))
+        dirs.append(dirpath)
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         for fn in filenames:
             if not fn.startswith(".") and os.path.splitext(fn)[1].lower() in AUDIO_EXTS:
@@ -544,7 +696,7 @@ def scan_worker(root, known, cancelled, on_batch, on_progress, on_done):
         if now - last > 0.15:
             on_progress(i + 1, total)
             last = now
-    on_done(batch, seen)
+    on_done(batch, seen, dirs)
 
 
 # ----------------------------------------------------------------------------------------
@@ -560,6 +712,19 @@ class PlayQueue:
         self.pos = -1
         self.shuffle = False
         self.repeat = "off"  # off | all | one
+        self.upnext = []     # "Play Next" / "Add to Queue" songs, played before the normal order
+        self.skipped = []    # files that vanished (moved/renamed) and were skipped
+
+    def add_upnext(self, paths, front):
+        with self.lock:
+            if front:
+                self.upnext[0:0] = list(paths)
+            else:
+                self.upnext.extend(paths)
+
+    def clear_upnext(self):
+        with self.lock:
+            self.upnext = []
 
     def _build(self, start):
         n = len(self.paths)
@@ -595,24 +760,49 @@ class PlayQueue:
             return self._path(self.pos)
 
     def peek(self, step, auto):
-        """Returns (pos, path) of the neighbour track, or None at the end of the queue."""
+        """(pos, path) of the next/previous song, or None at the end of the queue.
+        pos is None for an up-next song. Files that no longer exist are skipped."""
         with self.lock:
+            if step == 1:
+                while self.upnext:
+                    if os.path.exists(self.upnext[0]):
+                        return None, self.upnext[0]
+                    self.skipped.append(self.upnext.pop(0))
             n = len(self.order)
             if not n:
                 return None
-            if auto and self.repeat == "one" and 0 <= self.pos < n:
+            if auto and self.repeat == "one" and 0 <= self.pos < n and os.path.exists(self._path(self.pos)):
                 return self.pos, self._path(self.pos)
-            np = self.pos + step
-            if np >= n:
-                if self.repeat == "off":
+            p = self.pos
+            for _ in range(n):
+                np = p + step
+                if np >= n:
+                    if self.repeat == "off":
+                        return None
+                    np = 0
+                if np < 0:
+                    np = n - 1 if self.repeat != "off" else 0
+                path = self._path(np)
+                if os.path.exists(path):
+                    return np, path
+                if path not in self.skipped:
+                    self.skipped.append(path)
+                if np == p:
                     return None
-                np = 0
-            if np < 0:
-                np = n - 1 if self.repeat != "off" else 0
-            return np, self._path(np)
+                p = np
+            return None
+
+    def take_skipped(self):
+        with self.lock:
+            out, self.skipped = self.skipped, []
+            return out
 
     def sync(self, pos, path):
         with self.lock:
+            if pos is None:  # an up-next song started
+                if self.upnext and self.upnext[0] == path:
+                    self.upnext.pop(0)
+                return
             if self._path(pos) == path:
                 self.pos = pos
                 return
@@ -654,9 +844,67 @@ class Engine:
         self.pb.connect("about-to-finish", self._on_about_to_finish)
         self.state = "stopped"  # stopped | playing | paused
         self._pending_seek = None
+        self.rg_mode = "off"      # off | track | album
+        self.eq_bands = [0.0] * 10
+        self.rg = None
+        self.lev = None
+        self.eq = None
+        self.applied = (None, 0.0)
+        self._filter_mode = None
+
+    def _build_filter(self):
+        """audio-filter: [rgvolume ! rglimiter] ! equalizer-10bands. Only changeable in NULL state."""
+        parts = ["audioconvert"]
+        if self.rg_mode != "off":
+            # rgvolume handles files that carry ReplayGain tags; "lev" applies our own measurement
+            # to files without tags (set per song in _rg_probe); rglimiter catches any peaks.
+            parts += ["rgvolume name=rg fallback-gain=0", "volume name=lev", "rglimiter", "audioconvert"]
+        parts += ["equalizer-10bands name=eq", "audioconvert"]
+        try:
+            fbin = Gst.parse_bin_from_description(" ! ".join(parts), True)
+        except Exception as e:
+            print("player163: audio filter unavailable:", e, file=sys.stderr)
+            self.rg = self.lev = self.eq = None
+            self._filter_mode = self.rg_mode
+            return
+        self.rg = fbin.get_by_name("rg")
+        self.lev = fbin.get_by_name("lev")
+        self.eq = fbin.get_by_name("eq")
+        if self.rg is not None:
+            self.rg.set_property("album-mode", self.rg_mode == "album")
+            self.rg.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._rg_probe)
+        self._apply_eq()
+        self.pb.set_property("audio-filter", fbin)
+        self._filter_mode = self.rg_mode
+
+    def _rg_probe(self, pad, info):
+        """Runs in the streaming thread right as each song starts (also gapless): songs without
+        ReplayGain tags get their measured gain as rgvolume's fallback."""
+        ev = info.get_event()
+        if ev is not None and ev.type == Gst.EventType.STREAM_START and self.lev is not None:
+            pend = self.win.pending
+            path = pend[1] if pend else self.win.current_path
+            try:
+                db = float(self.win.level_gain(path))
+            except Exception:
+                db = 0.0
+            self.lev.set_property("volume", 10 ** (db / 20.0))
+            self.applied = (path, db)
+        return Gst.PadProbeReturn.OK
+
+    def set_eq(self, bands):
+        self.eq_bands = [float(b) for b in bands]
+        self._apply_eq()
+
+    def _apply_eq(self):
+        if self.eq is not None:
+            for i, g in enumerate(self.eq_bands):
+                self.eq.set_property("band%d" % i, g)
 
     def load(self, path, start=0.0):
         self.pb.set_state(Gst.State.NULL)
+        if self._filter_mode != self.rg_mode:
+            self._build_filter()
         self.pb.set_property("uri", Gst.filename_to_uri(path))
         self._pending_seek = start if start and start > 0.5 else None
         self.pb.set_state(Gst.State.PLAYING)
@@ -697,7 +945,7 @@ class Engine:
     # Called from a GStreamer streaming thread: queue the next file for gapless playback.
     def _on_about_to_finish(self, pb):
         nxt = self.win.queue.peek(1, auto=True)
-        if nxt and os.path.exists(nxt[1]):
+        if nxt:
             self.win.pending = nxt
             pb.set_property("uri", Gst.filename_to_uri(nxt[1]))
 
@@ -1024,6 +1272,101 @@ class TagDialog(Gtk.Dialog):
         return True
 
 
+class EqualizerDialog(Gtk.Dialog):
+    def __init__(self, main):
+        Gtk.Dialog.__init__(self, title="Equalizer", transient_for=main, modal=False, use_header_bar=True)
+        self.main = main
+        self.set_resizable(False)
+        self._setting = False
+        hb = self.get_header_bar()
+        self.switch = Gtk.Switch(active=bool(main.cfg.get("eq_on")), valign=Gtk.Align.CENTER)
+        self.switch.set_tooltip_text("Equalizer on / off")
+        self.switch.connect("notify::active", self._on_switch)
+        hb.pack_start(self.switch)
+        self.preset = Gtk.ComboBoxText()
+        for name in list(EQ_PRESETS) + ["Custom"]:
+            self.preset.append(name, name)
+        self.preset.connect("changed", self._on_preset)
+        hb.pack_end(self.preset)
+
+        area = self.get_content_area()
+        area.set_border_width(18)
+        bands = Gtk.Box(spacing=10, homogeneous=True)
+        area.pack_start(bands, True, True, 0)
+        self.scales, self.vlabels = [], []
+        for i, lab in enumerate(EQ_LABELS):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            v = Gtk.Label(label="0")
+            v.get_style_context().add_class("dim-label")
+            sc = Gtk.Scale(orientation=Gtk.Orientation.VERTICAL,
+                           adjustment=Gtk.Adjustment(value=0, lower=-12, upper=12, step_increment=0.5, page_increment=2))
+            sc.set_inverted(True)
+            sc.set_draw_value(False)
+            sc.set_size_request(-1, 190)
+            sc.add_mark(0, Gtk.PositionType.LEFT, None)
+            sc.connect("value-changed", self._on_band, i)
+            f = Gtk.Label()
+            f.set_markup("<small>%s</small>" % lab)
+            col.pack_start(v, False, False, 0)
+            col.pack_start(sc, True, True, 0)
+            col.pack_start(f, False, False, 0)
+            bands.pack_start(col, True, True, 0)
+            self.scales.append(sc)
+            self.vlabels.append(v)
+        hint = Gtk.Label(xalign=0.5)
+        hint.set_markup("<small>Bands in Hz · ±12 dB. Changes apply instantly.</small>")
+        hint.get_style_context().add_class("dim-label")
+        area.pack_start(hint, False, False, 10)
+        self._set_values(main._eq_values())
+        self._setting = True
+        self.preset.set_active_id(main.cfg.get("eq_preset", "Flat") if main.cfg.get("eq_preset") in EQ_PRESETS else "Custom")
+        self._setting = False
+        self._sync_sensitive()
+        self.connect("delete-event", lambda *a: (self.hide(), True)[1])
+
+    def _set_values(self, vals):
+        self._setting = True
+        for sc, v in zip(self.scales, vals):
+            sc.set_value(v)
+        self._setting = False
+        self._update_labels()
+
+    def _update_labels(self):
+        for sc, lab in zip(self.scales, self.vlabels):
+            v = sc.get_value()
+            lab.set_text(("+%g" % v) if v > 0 else ("%g" % v))
+
+    def _values(self):
+        return [round(sc.get_value(), 1) for sc in self.scales]
+
+    def _sync_sensitive(self):
+        on = self.switch.get_active()
+        for sc in self.scales:
+            sc.set_sensitive(on)
+        self.preset.set_sensitive(on)
+
+    def _on_switch(self, *a):
+        self.main.set_eq_on(self.switch.get_active())
+        self._sync_sensitive()
+
+    def _on_band(self, sc, i):
+        self._update_labels()
+        if self._setting:
+            return
+        self._setting = True
+        self.preset.set_active_id("Custom")
+        self._setting = False
+        self.main.set_eq_bands(self._values(), "Custom")
+
+    def _on_preset(self, combo):
+        if self._setting:
+            return
+        name = combo.get_active_id()
+        if name in EQ_PRESETS:
+            self._set_values(EQ_PRESETS[name])
+            self.main.set_eq_bands(self._values(), name)
+
+
 def ask_text(parent, title, message, initial, suggestions=()):
     d = Gtk.Dialog(title=title, transient_for=parent, modal=True, use_header_bar=True)
     d.add_button("Cancel", Gtk.ResponseType.CANCEL)
@@ -1141,6 +1484,22 @@ window.mini-window-transparent, window.mini-window-transparent.background { back
 .status-line { background-color: @p_bar; font-size: 0.9em; padding: 3px 10px; }
 .empty-title { font-size: 1.5em; font-weight: bold; }
 .big-wordmark { font-size: 2.2em; font-weight: 800; }
+
+/* Rounded everywhere, whatever the system theme does */
+button { border-radius: 8px; }
+button.image-button, button.titlebutton, headerbar button.titlebutton,
+.player-bar button.flat, .player-bar button.play-button, .view-toggle button { border-radius: 999px; }
+headerbar button.image-button, headerbar button.titlebutton { min-width: 30px; min-height: 30px; padding: 3px; }
+.mode-switch button { border-radius: 999px; padding: 5px 16px; }
+entry.search, headerbar entry { border-radius: 999px; padding-left: 10px; padding-right: 10px; }
+treeview.view header button { border-radius: 0; }
+popover, popover.background { border-radius: 12px; }
+menu, .menu, .context-menu { border-radius: 10px; }
+switch { border-radius: 999px; }
+switch slider { border-radius: 999px; }
+switch:checked { background-color: @p_accent; border-color: @p_accent; color: @p_accent_fg; }
+iconview { background-color: @p_bg; color: @p_fg; }
+iconview:selected, iconview:selected:focus { background-color: @p_accent; color: @p_accent_fg; border-radius: 12px; }
 """
 
 
@@ -1312,7 +1671,7 @@ class ThumbLoader:
                     pb = pixbuf_from_bytes(data, self.size * self.scale) if data else None
                     os.makedirs(THUMB_DIR, exist_ok=True)
                     if pb is not None:
-                        pb = rounded_pixbuf(pb, 5 * self.scale)
+                        pb = rounded_pixbuf(pb, max(3, self.size // 10) * self.scale)
                         pb.savev(base + ".png", "png", [], [])
                     else:
                         open(base + ".none", "w").close()
@@ -1583,6 +1942,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.queue.shuffle = bool(self.cfg.get("shuffle", False))
         self.queue.repeat = self.cfg.get("repeat", "off") if self.cfg.get("repeat") in ("off", "all", "one") else "off"
         self.engine = Engine(self)
+        self.engine.rg_mode = self.cfg.get("replaygain", "album") if self.cfg.get("replaygain") in ("off", "track", "album") else "album"
+        self.engine.set_eq(self._eq_values() if self.cfg.get("eq_on") else [0] * 10)
+        self.analyzer = LoudnessAnalyzer(self._loudness_ready)
 
         self.current_path = None
         self.current_duration = 0.0
@@ -1607,6 +1969,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self._ready = False
         self._syncing_volume = False
         self._scan_new = set()
+        self._scanning = False
+        self._scan_quiet = False
+        self._rescan_after = False
+        self._monitors = {}
+        self._autoscan_id = 0
+        self._ignore_fs_until = 0.0
+        self.small_thumbs = {}       # album key -> surface (False = no art)
+        self.big_thumbs = {}
+        self._album_rep = {}         # album key -> path of its first track
+        self._artist_rep = {}        # artist -> (album key, track path) whose cover represents them
+        self.album_layout = self.cfg.get("album_layout", "list") if self.cfg.get("album_layout") in ("list", "grid") else "list"
+        self._album_gain = {}        # album key -> combined measured gain (dB)
+        self._eq_dialog = None
+        self._an_status_t = 0.0
 
         self._apply_css()
         self._main_pos = (int(self.cfg["x"]), int(self.cfg["y"])) if "x" in self.cfg and on_screen(self.cfg["x"], self.cfg["y"]) else None
@@ -1641,6 +2017,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.stack.set_visible_child_name("library")
             self.refresh_all()
             self.start_scan()
+            self.analyzer.paused = self.engine.rg_mode == "off"
             last = self.cfg.get("last_path")
             if last and last in self.library.tracks:
                 self._resume = (last, float(self.cfg.get("last_pos", 0)))
@@ -1683,8 +2060,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Header bar --------------------------------------------------------
         hb = Gtk.HeaderBar(show_close_button=True)
         self.set_titlebar(hb)
-        switch = Gtk.Box()
-        switch.get_style_context().add_class("linked")
+        switch = Gtk.Box(spacing=8)
         switch.get_style_context().add_class("mode-switch")
         self.mode_buttons = {}
         group = None
@@ -1717,6 +2093,23 @@ class MainWindow(Gtk.ApplicationWindow):
         rescan.set_tooltip_text("Rescan folder for new or changed files  (F5)")
         rescan.connect("clicked", lambda *_: self.start_scan())
         hb.pack_start(rescan)
+        self.layout_box = Gtk.Box(spacing=4)
+        self.layout_box.get_style_context().add_class("view-toggle")
+        self.layout_btns = {}
+        lgroup = None
+        for key, icon, tip in (("grid", "view-grid-symbolic", "Album grid"), ("list", "view-list-symbolic", "Album list")):
+            b = Gtk.RadioButton.new_from_widget(lgroup)
+            lgroup = lgroup or b
+            b.set_mode(False)
+            b.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+            b.get_style_context().add_class("image-button")
+            b.set_tooltip_text(tip)
+            b.set_focus_on_click(False)
+            b.set_active(key == self.album_layout)
+            b.connect("toggled", self._on_layout_toggled, key)
+            self.layout_box.pack_start(b, False, False, 0)
+            self.layout_btns[key] = b
+        hb.pack_start(self.layout_box)
 
         menu = Gio.Menu()
         sec1 = Gio.Menu()
@@ -1724,8 +2117,17 @@ class MainWindow(Gtk.ApplicationWindow):
         sec1.append("Rescan Folder", "win.rescan")
         sec1.append("Jump to Playing Song", "win.jump")
         sec1.append("Mini Player", "win.mini")
+        sec1.append("Clear Up Next", "win.clear-queue")
         sec1.append("Export Favorites as Playlist…", "win.export-favs")
         menu.append_section(None, sec1)
+        sec_sound = Gio.Menu()
+        lev = Gio.Menu()
+        lev.append("Off", "win.replaygain::off")
+        lev.append("Per Song", "win.replaygain::track")
+        lev.append("Per Album", "win.replaygain::album")
+        sec_sound.append_submenu("Volume Leveling", lev)
+        sec_sound.append("Equalizer…", "win.equalizer")
+        menu.append_section(None, sec_sound)
         sec2 = Gio.Menu()
         sec_theme = Gio.Menu()
         sec_theme.append("Dark Theme", "win.theme::dark")
@@ -1781,8 +2183,35 @@ class MainWindow(Gtk.ApplicationWindow):
         self.stack.add_named(empty, "empty")
 
         # Library page: sidebar + songs
+        libpage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.stack.add_named(libpage, "library")
+        self.lib_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=120)
+        libpage.pack_start(self.lib_stack, True, True, 0)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.stack.add_named(self.paned, "library")
+        self.lib_stack.add_named(self.paned, "list")
+
+        self.grid_store = Gtk.ListStore(str, str)  # album key, markup
+        self.grid_view = Gtk.IconView(model=self.grid_store)
+        self.grid_view.set_item_width(GRID_THUMB)
+        self.grid_view.set_margin(16)
+        self.grid_view.set_column_spacing(10)
+        self.grid_view.set_row_spacing(14)
+        self.grid_view.set_item_padding(8)
+        self.grid_view.set_activate_on_single_click(True)
+        gpix = Gtk.CellRendererPixbuf()
+        gpix.set_fixed_size(GRID_THUMB, GRID_THUMB)
+        self.grid_view.pack_start(gpix, False)
+        self.grid_view.set_cell_data_func(gpix, self._cell_grid_thumb)
+        gtxt = Gtk.CellRendererText(xalign=0.5, alignment=Pango.Alignment.CENTER,
+                                    ellipsize=Pango.EllipsizeMode.END, wrap_width=GRID_THUMB)
+        gtxt.set_fixed_size(GRID_THUMB, -1)
+        self.grid_view.pack_start(gtxt, False)
+        self.grid_view.add_attribute(gtxt, "markup", 1)
+        self.grid_view.connect("item-activated", self._on_grid_activated)
+        self.grid_view.connect("button-press-event", self._on_grid_button)
+        gscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        gscroll.add(self.grid_view)
+        self.lib_stack.add_named(gscroll, "grid")
 
         self.group_store = Gtk.ListStore(str, str)  # key, markup
         self.group_view = Gtk.TreeView(model=self.group_store, headers_visible=False, enable_search=True)
@@ -1798,7 +2227,10 @@ class MainWindow(Gtk.ApplicationWindow):
         gcol.pack_start(gcell, True)
         gcol.add_attribute(gcell, "markup", 1)
         self.group_view.append_column(gcol)
-        self._thumb_loader = ThumbLoader(ALBUM_THUMB, max(1, self.get_scale_factor()), self._thumb_ready)
+        sf = max(1, self.get_scale_factor())
+        self._thumb_loader = ThumbLoader(ALBUM_THUMB, sf, self._thumb_ready)
+        self._small_loader = ThumbLoader(SMALL_THUMB, sf, self._small_thumb_ready)
+        self._big_loader = ThumbLoader(GRID_THUMB, sf, self._big_thumb_ready)
         self.group_view.get_selection().connect("changed", self._on_group_changed)
         self.group_view.connect("button-press-event", self._on_group_button)
         self.group_view.connect("row-activated", lambda *a: self.play_visible(None))
@@ -1817,8 +2249,11 @@ class MainWindow(Gtk.ApplicationWindow):
         icell = Gtk.CellRendererPixbuf(xpad=4)
         icol = Gtk.TreeViewColumn("", icell)
         icol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-        icol.set_fixed_width(28)
+        icol.set_fixed_width(30)
         icol.set_cell_data_func(icell, self._cell_icon)
+        qcell = Gtk.CellRendererText(xalign=0.5, scale=0.85, weight=700)
+        icol.pack_start(qcell, True)
+        icol.set_cell_data_func(qcell, self._cell_qnum)
         self.song_view.append_column(icol)
         self.sort_columns = {}
         for header, idx, width, expand, xalign, sid in SONG_COLS:
@@ -1830,7 +2265,16 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.fav_col.set_cell_data_func(fcell, self._cell_fav)
                 self.song_view.append_column(self.fav_col)
             cell = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END, xalign=xalign)
-            col = Gtk.TreeViewColumn(header, cell, text=idx)
+            if sid == "album":  # small cover beside the album name
+                col = Gtk.TreeViewColumn(header)
+                acell = Gtk.CellRendererPixbuf(xpad=0)
+                acell.set_fixed_size(SMALL_THUMB + 6, SMALL_THUMB)
+                col.pack_start(acell, False)
+                col.set_cell_data_func(acell, self._cell_small_thumb)
+                col.pack_start(cell, True)
+                col.add_attribute(cell, "text", idx)
+            else:
+                col = Gtk.TreeViewColumn(header, cell, text=idx)
             col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
             col.set_fixed_width(int(self.cfg.get("col_" + sid, width)))
             col.set_resizable(True)
@@ -1855,7 +2299,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
         self.status.get_style_context().add_class("dim-label")
         status.pack_start(self.status, True, True, 0)
-        right.pack_start(status, False, False, 0)
+        libpage.pack_start(status, False, False, 0)
 
         outer.pack_start(Gtk.Separator(), False, False, 0)
         outer.pack_start(self._build_player_bar(), False, False, 0)
@@ -1955,6 +2399,11 @@ class MainWindow(Gtk.ApplicationWindow):
         add("mode-favorites", lambda: self.mode_buttons["favorites"].set_active(True), ["<Primary>4"])
         add("fav-current", self.toggle_fav_current, ["<Primary>d"])
         add("export-favs", self.export_favorites)
+        add("clear-queue", self.clear_queue)
+        add("equalizer", self.show_equalizer, ["<Primary><Shift>e"])
+        rg = Gio.SimpleAction.new_stateful("replaygain", GLib.VariantType.new("s"), GLib.Variant("s", self.engine.rg_mode))
+        rg.connect("activate", lambda a, v: (a.set_state(v), self.set_rg_mode(v.get_string())))
+        self.add_action(rg)
         add("shortcuts", self.show_shortcuts, ["F1"])
         add("about", self.show_about)
         theme = Gio.SimpleAction.new_stateful("theme", GLib.VariantType.new("s"), GLib.Variant("s", self.scheme))
@@ -1966,8 +2415,25 @@ class MainWindow(Gtk.ApplicationWindow):
         if model.get_value(it, 0) == self.current_path and self.current_path:
             icon = "media-playback-pause-symbolic" if self.engine.state == "paused" else "media-playback-start-symbolic"
             cell.set_property("icon-name", icon if self.engine.state != "stopped" else "media-playback-stop-symbolic")
+            cell.set_visible(True)
         else:
             cell.set_property("icon-name", None)
+            cell.set_visible(False)  # leave the space for a queue number
+
+    def _cell_qnum(self, col, cell, model, it, data):
+        p = model.get_value(it, 0)
+        text = ""
+        if self.queue.upnext and not (p == self.current_path and self.engine.state != "stopped"):
+            try:
+                text = str(self.queue.upnext.index(p) + 1)
+            except ValueError:
+                text = ""
+        cell.set_property("text", text)
+        if text:
+            sel = self.song_view.get_selection().iter_is_selected(it)
+            pal = PALETTES[self.scheme]
+            cell.set_property("foreground", pal["accent_fg"] if sel else pal["accent_text"])
+        cell.set_visible(bool(text))
 
     def _cell_fav(self, col, cell, model, it, data):
         on = model.get_value(it, 0) in self.library.favs
@@ -1975,7 +2441,7 @@ class MainWindow(Gtk.ApplicationWindow):
         cell.set_property("surface", self._thumbs["list_" + ("on" if on else "off") + ("_sel" if sel else "")])
 
     def _cell_group_thumb(self, col, cell, model, it, data):
-        if self.mode != "albums":
+        if self.mode not in ("albums", "artists"):
             cell.set_visible(False)
             return
         cell.set_visible(True)
@@ -1983,8 +2449,54 @@ class MainWindow(Gtk.ApplicationWindow):
         if key == ALL_KEY:
             cell.set_property("surface", self._blank_thumb)
             return
+        if self.mode == "artists":  # an artist shows the cover of one of their albums
+            key = self._artist_rep.get(key, (None, None))[0]
         e = self.album_thumbs.get(key)
         cell.set_property("surface", e[1] if e and e[1] is not None else self._album_placeholder)
+
+    def _clear_thumbs(self):
+        self.album_thumbs.clear()
+        self.small_thumbs.clear()
+        self.big_thumbs.clear()
+
+    def _surface(self, pb):
+        if pb is None:
+            return None
+        try:
+            return Gdk.cairo_surface_create_from_pixbuf(pb, max(1, self.get_scale_factor()), None)
+        except Exception:
+            return None
+
+    def _cell_small_thumb(self, col, cell, model, it, data):
+        t = self.get_track(model.get_value(it, 0))
+        surf = self._blank_small
+        if t and t["album"]:
+            key = t["album_key"]
+            e = self.small_thumbs.get(key)
+            if e is None:
+                self._small_loader.request(key, self._album_rep.get(key, t["path"]))
+            elif e is not False:
+                surf = e
+        cell.set_property("surface", surf)
+
+    def _small_thumb_ready(self, key, path, pb):
+        self._small_loader.pending.discard(key)
+        self.small_thumbs[key] = self._surface(pb) or False
+        self.song_view.queue_draw()
+        return False
+
+    def _cell_grid_thumb(self, layout, cell, model, it, data=None):
+        key = model.get_value(it, 0)
+        e = self.big_thumbs.get(key)
+        if e is None and key in self._album_rep:
+            self._big_loader.request(key, self._album_rep[key])
+        cell.set_property("surface", e if e else self._grid_placeholder)
+
+    def _big_thumb_ready(self, key, path, pb):
+        self._big_loader.pending.discard(key)
+        self.big_thumbs[key] = self._surface(pb) or False
+        self.grid_view.queue_draw()
+        return False
 
     def _thumb_ready(self, key, path, pb):
         self._thumb_loader.pending.discard(key)
@@ -2007,9 +2519,17 @@ class MainWindow(Gtk.ApplicationWindow):
             self._blank_thumb.set_device_scale(sf, sf)
         else:
             self._blank_thumb = None
-        self._album_placeholder = placeholder_surface(
-            ALBUM_THUMB, "#1e1e1e" if self.scheme == "dark" else "#e8e8e3",
-            "#4a4a4a" if self.scheme == "dark" else "#b9b9b3", sf)
+        ph_bg = "#1e1e1e" if self.scheme == "dark" else "#e8e8e3"
+        ph_fg = "#4a4a4a" if self.scheme == "dark" else "#b9b9b3"
+        self._album_placeholder = placeholder_surface(ALBUM_THUMB, ph_bg, ph_fg, sf)
+        self._grid_placeholder = placeholder_surface(GRID_THUMB, ph_bg, ph_fg, sf)
+        if cairo is not None:
+            self._blank_small = cairo.ImageSurface(cairo.FORMAT_ARGB32, SMALL_THUMB * sf, SMALL_THUMB * sf)
+            self._blank_small.set_device_scale(sf, sf)
+        else:
+            self._blank_small = None
+        if hasattr(self, "grid_view"):
+            self.grid_view.queue_draw()
         if hasattr(self, "group_view"):
             self.group_view.queue_draw()
         self._thumbs = {
@@ -2069,7 +2589,11 @@ class MainWindow(Gtk.ApplicationWindow):
             g = groups.get(key)
             if g is None:
                 groups[key] = g = {"n": 0, "t": t, "albums": set(), "year": "", "rep": t}
-            if (t["disc"], t["track"], t["path"]) < (g["rep"]["disc"], g["rep"]["track"], g["rep"]["path"]):
+            if self.mode == "artists":
+                newer = (t["year"] or "0", -t["disc"], -t["track"]) > (g["rep"]["year"] or "0", -g["rep"]["disc"], -g["rep"]["track"])
+                if t["album"] and (newer or not g["rep"]["album"]):
+                    g["rep"] = t  # newest album's first track represents the artist
+            elif (t["disc"], t["track"], t["path"]) < (g["rep"]["disc"], g["rep"]["track"], g["rep"]["path"]):
                 g["rep"] = t  # first track of the album: its art (or folder cover) is the album's
             g["n"] += 1
             g["albums"].add(t["album"])
@@ -2091,6 +2615,10 @@ class MainWindow(Gtk.ApplicationWindow):
             for k in keys:
                 g = groups[k]
                 if self.mode == "artists":
+                    rt = g["rep"]
+                    self._artist_rep[k] = (rt["album_key"], rt["path"])
+                    if rt["album"] and self.album_thumbs.get(rt["album_key"]) is None:
+                        self._thumb_loader.request(rt["album_key"], rt["path"])
                     na = len(g["albums"])
                     markup = "%s\n<small><span alpha='60%%'>%d song%s · %d album%s</span></small>" % (
                         esc(k), g["n"], "" if g["n"] == 1 else "s", na, "" if na == 1 else "s")
@@ -2102,11 +2630,21 @@ class MainWindow(Gtk.ApplicationWindow):
                     bits.append("%d song%s" % (g["n"], "" if g["n"] == 1 else "s"))
                     markup = "%s\n<small><span alpha='60%%'>%s</span></small>" % (esc(t["d_album"]), " · ".join(bits))
                     rep_path = g["rep"]["path"]
+                    self._album_rep[k] = rep_path
                     have = self.album_thumbs.get(k)
                     if have is None or have[0] != rep_path:
                         self._thumb_loader.request(k, rep_path)
                 self.group_store.append([k, markup])
             self.group_view.set_model(self.group_store)
+            if self.mode == "albums":
+                self.grid_view.set_model(None)
+                self.grid_store.clear()
+                for k in keys:
+                    t = groups[k]["t"]
+                    sub = t["d_albumartist"] + (" · " + groups[k]["year"] if groups[k]["year"] else "")
+                    self.grid_store.append([k, "<b>%s</b>\n<small><span alpha='60%%'>%s</span></small>"
+                                            % (esc(t["d_album"]), esc(sub))])
+                self.grid_view.set_model(self.grid_store)
             sel = self.group_view.get_selection()
             target = 0
             if self.group_sel is not None:
@@ -2186,6 +2724,11 @@ class MainWindow(Gtk.ApplicationWindow):
             bits.append(fmt_total(total))
         if self.search.get_text().strip():
             bits.append("filtered")
+        if self.queue.upnext:
+            bits.append("%d up next" % len(self.queue.upnext))
+        if self.engine.rg_mode != "off" and self.analyzer.queued:
+            bits.append("leveling: measuring {:,} song{}".format(len(self.analyzer.queued),
+                                                               "" if len(self.analyzer.queued) == 1 else "s"))
         if self.mode == "favorites":
             bits[0] = "Favorites"
             if not n and not self.search.get_text().strip():
@@ -2201,6 +2744,48 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _apply_mode_visibility(self):
         self.sidebar.set_visible(self.mode in ("artists", "albums"))
+        grid = self.mode == "albums" and self.album_layout == "grid"
+        self.lib_stack.set_visible_child_name("grid" if grid else "list")
+        self.layout_box.set_visible(self.mode == "albums")
+
+    def _on_layout_toggled(self, btn, layout):
+        if not btn.get_active() or not self._ready:
+            return
+        self.album_layout = layout
+        self.cfg["album_layout"] = layout
+        self._apply_mode_visibility()
+        self.refresh_all()
+
+    def _album_paths(self, key):
+        ts = [t for t in self.library.tracks.values() if t["album_key"] == key]
+        ts.sort(key=lambda t: (t["disc"], t["track"], t["sk_title"]))
+        return [t["path"] for t in ts]
+
+    def _on_grid_activated(self, view, tree_path):
+        key = self.grid_store[tree_path][0]
+        self.group_sel = key
+        self.cfg["sel_albums"] = key
+        self.layout_btns["list"].set_active(True)  # opens the album's songs
+
+    def _on_grid_button(self, view, ev):
+        if ev.type != Gdk.EventType.BUTTON_PRESS or ev.button != 3:
+            return False
+        tp = view.get_path_at_pos(int(ev.x), int(ev.y))
+        if tp is None:
+            return True
+        view.select_path(tp)
+        key = self.grid_store[tp][0]
+        paths = self._album_paths(key)
+        menu = Gtk.Menu()
+        self._menu_item(menu, "Play Album", lambda: self.play_paths(paths))
+        self._menu_item(menu, "Play Next", lambda: self.queue_paths(paths, True))
+        self._menu_item(menu, "Add to Queue", lambda: self.queue_paths(paths, False))
+        menu.append(Gtk.SeparatorMenuItem())
+        self._menu_item(menu, "Rename Album…", lambda: self.rename_album(key))
+        self._menu_item(menu, "Edit Tags of All %d Songs…" % len(paths),
+                        lambda: self.edit_tracks([self.library.tracks[p] for p in paths]))
+        self._popup(menu, ev, view)
+        return True
 
     def _on_mode_toggled(self, btn, key):
         if not btn.get_active() or not self._ready:
@@ -2273,7 +2858,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._scan_gen += 1
             self.library.clear()
             self.group_sel = None
-            self.album_thumbs.clear()
+            self._clear_thumbs()
             for k in ("sel_artists", "sel_albums", "last_path", "last_pos"):
                 self.cfg.pop(k, None)
             self.cfg["folder"] = path
@@ -2282,20 +2867,25 @@ class MainWindow(Gtk.ApplicationWindow):
         self.refresh_all()
         self.start_scan()
 
-    def start_scan(self):
+    def start_scan(self, quiet=False):
         root = self.cfg.get("folder")
         if not root:
-            self.choose_folder()
+            if not quiet:
+                self.choose_folder()
             return
         if not os.path.isdir(root):
-            self.show_error("Can't find your music folder:\n%s\n(Is the drive connected?)" % root)
+            if not quiet:
+                self.show_error("Can't find your music folder:\n%s\n(Is the drive connected?)" % root)
             return
         self._scan_gen += 1
         gen = self._scan_gen
+        self._scanning = True
+        self._scan_quiet = quiet
         known = {p: t["mtime"] for p, t in self.library.tracks.items()}
-        self.scan_spinner.show()
-        self.scan_spinner.start()
-        self._update_status(text="Scanning your music…")
+        if not quiet:
+            self.scan_spinner.show()
+            self.scan_spinner.start()
+            self._update_status(text="Scanning your music…")
 
         def cancelled():
             return gen != self._scan_gen
@@ -2306,8 +2896,8 @@ class MainWindow(Gtk.ApplicationWindow):
         def on_progress(i, n):
             GLib.idle_add(self._scan_progress, gen, i, n)
 
-        def on_done(batch, seen):
-            GLib.idle_add(self._scan_done, gen, batch, seen)
+        def on_done(batch, seen, dirs):
+            GLib.idle_add(self._scan_done, gen, batch, seen, dirs)
 
         th = threading.Thread(target=scan_worker, args=(root, known, cancelled, on_batch, on_progress, on_done),
                               daemon=True)
@@ -2329,7 +2919,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._scan_refresh_id = 0
                 if gen == self._scan_gen:
                     self.refresh_all(keep_scroll=True)
-                    self._update_status(text=self._scan_text)
+                    if not self._scan_quiet:
+                        self._update_status(text=self._scan_text)
                 return False
             self._scan_refresh_id = GLib.timeout_add(1500, later)
         return False
@@ -2341,12 +2932,14 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         self._scan_text = ("Finding music… {:,} files".format(n) if i == 0
                            else "Reading tags… {:,} of {:,}".format(i, n))
-        self._update_status(text=self._scan_text)
+        if not self._scan_quiet:
+            self._update_status(text=self._scan_text)
         return False
 
-    def _scan_done(self, gen, batch, seen):
+    def _scan_done(self, gen, batch, seen, dirs=None):
         if gen != self._scan_gen:
             return False
+        self._scanning = False
         self._merge_scanned(batch)
         if seen or not self.library.tracks:
             gone = [p for p in self.library.tracks if p not in seen]
@@ -2365,7 +2958,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         if old:
                             self.library.move_favorite(old, p)
         self._scan_new = set()
-        self.album_thumbs.clear()  # covers may have been added/changed; the disk cache makes this cheap
+        self._clear_thumbs()  # covers may have been added/changed; the disk cache makes this cheap
         self.scan_spinner.stop()
         self.scan_spinner.hide()
         if self._scan_refresh_id:
@@ -2374,6 +2967,161 @@ class MainWindow(Gtk.ApplicationWindow):
         self.refresh_all(keep_scroll=True)
         if not self.library.tracks:
             self._update_status(text="No music files found in this folder")
+        self._watch_dirs(dirs)
+        self._schedule_analysis()
+        if self._rescan_after:
+            self._rescan_after = False
+            GLib.idle_add(lambda: self.start_scan(quiet=True) and False)
+        return False
+
+    # ---------------------------------------------------------------- volume leveling
+    def level_gain(self, path):
+        """Gain (dB) for a song we measured ourselves; 0 for songs with ReplayGain tags (rgvolume
+        handles those) or not measured yet. Called from the streaming thread."""
+        e = self.library.loud.get(path) if path else None
+        if not e or e[1] is None or e[4] != "scan":
+            return 0.0
+        g = e[1]
+        if self.engine.rg_mode == "album":
+            t = self.get_track(path)
+            ag = self._album_gain.get(t["album_key"]) if t else None
+            if ag is not None:
+                g = ag
+        if e[2]:  # don't boost past the song's own peak (no clipping)
+            g = min(g, -20.0 * math.log10(max(e[2], 1e-6)))
+        return max(-20.0, min(20.0, g))
+
+    def _recompute_album_gain(self, key):
+        tracks = [t for t in self.library.tracks.values() if t["album_key"] == key]
+        num = den = 0.0
+        for t in tracks:
+            e = self.library.loud.get(t["path"])
+            if not e or e[1] is None or e[0] != t["mtime"]:
+                self._album_gain.pop(key, None)  # wait until the whole album is measured
+                return
+            w = max(t["duration"], 1.0)
+            num += w * 10 ** (-e[1] / 10.0)  # loudness relative to the reference, power-averaged
+            den += w
+        if den:
+            self._album_gain[key] = -10.0 * math.log10(num / den)
+
+    def _schedule_analysis(self):
+        if self.engine.rg_mode == "off":
+            return
+        loud = self.library.loud
+        cur_album = (self.get_track(self.current_path) or {}).get("album_key")
+        todo = [t for t in self.library.tracks.values()
+                if t["path"] not in loud or loud[t["path"]][0] != t["mtime"]]
+        todo.sort(key=lambda t: (t["album_key"] != cur_album, t["sk_artist"], t["sk_album"], t["disc"], t["track"]))
+        self.analyzer.submit([(t["path"], t["mtime"]) for t in todo])
+        if not self._album_gain:
+            for key in {t["album_key"] for t in self.library.tracks.values()}:
+                self._recompute_album_gain(key)
+
+    def _loudness_ready(self, path, mtime, res):
+        self.analyzer.queued.discard(path)
+        if res is None:
+            res = (None, None, None, "fail")
+        self.library.set_loudness(path, mtime, *res)
+        t = self.library.tracks.get(path)
+        if t:
+            self._recompute_album_gain(t["album_key"])
+        now = time.monotonic()
+        if not getattr(self, "_flash_id", 0) and not self._scanning and (now - self._an_status_t > 1.0 or not self.analyzer.queued):
+            self._an_status_t = now
+            self._update_status()
+        return False
+
+    def set_rg_mode(self, mode):
+        if mode not in ("off", "track", "album") or mode == self.engine.rg_mode:
+            return
+        self.cfg["replaygain"] = mode
+        self.engine.rg_mode = mode
+        self.analyzer.paused = mode == "off"
+        if self.engine.state != "stopped" and self.current_path:  # apply now: reload at the same spot
+            was = self.engine.state
+            pos = self.engine.position()
+            self.pending = (self.queue.pos, self.current_path)
+            self.engine.load(self.current_path, pos)
+            if was == "paused":
+                self.engine.pause()
+            self._set_play_icon()
+        self._schedule_analysis()
+        label = {"off": "Volume leveling off", "track": "Volume leveling: per song",
+                 "album": "Volume leveling: per album"}[mode]
+        self.flash_status(label)
+
+    # ---------------------------------------------------------------- equalizer
+    def _eq_values(self):
+        vals = self.cfg.get("eq_bands")
+        if isinstance(vals, list) and len(vals) == 10:
+            try:
+                return [max(-12.0, min(12.0, float(v))) for v in vals]
+            except (TypeError, ValueError):
+                pass
+        return list(EQ_PRESETS.get(self.cfg.get("eq_preset", "Flat"), EQ_PRESETS["Flat"]))
+
+    def set_eq_on(self, on):
+        self.cfg["eq_on"] = bool(on)
+        self.engine.set_eq(self._eq_values() if on else [0] * 10)
+
+    def set_eq_bands(self, bands, preset):
+        self.cfg["eq_bands"] = [round(float(b), 1) for b in bands]
+        self.cfg["eq_preset"] = preset
+        if self.cfg.get("eq_on"):
+            self.engine.set_eq(bands)
+
+    def show_equalizer(self):
+        if self._eq_dialog is None:
+            self._eq_dialog = EqualizerDialog(self)
+        self._eq_dialog.show_all()
+        self._eq_dialog.present()
+
+    # ---------------------------------------------------------------- auto-detect new music
+    def _watch_dirs(self, dirs):
+        if dirs is None:
+            return
+        want = set(dirs[:MAX_WATCHED_DIRS])
+        for d in list(self._monitors):
+            if d not in want:
+                self._monitors.pop(d).cancel()
+        for d in want:
+            if d in self._monitors:
+                continue
+            try:
+                m = Gio.File.new_for_path(d).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+                m.connect("changed", self._on_dir_changed)
+                self._monitors[d] = m
+            except Exception as e:  # e.g. the system's inotify watch limit
+                print("player163: can't watch more folders:", e, file=sys.stderr)
+                break
+
+    @staticmethod
+    def _fs_relevant(name):
+        if not name or name.startswith("."):
+            return False
+        ext = os.path.splitext(name.lower())[1]
+        return ext in AUDIO_EXTS or ext in (".jpg", ".jpeg", ".png") or ext == ""
+
+    def _on_dir_changed(self, mon, f, other, event):
+        E = Gio.FileMonitorEvent
+        if event not in (E.CREATED, E.DELETED, E.CHANGES_DONE_HINT, E.MOVED_IN, E.MOVED_OUT, E.RENAMED):
+            return
+        if time.monotonic() < self._ignore_fs_until:  # our own tag edits
+            return
+        names = [f.get_basename() if f else None, other.get_basename() if other else None]
+        if not any(self._fs_relevant(n) for n in names):
+            return
+        if self._autoscan_id:
+            GLib.source_remove(self._autoscan_id)  # wait until the copy settles
+        self._autoscan_id = GLib.timeout_add(2500, self._autoscan)
+
+    def _autoscan(self):
+        self._autoscan_id = 0
+        if self._scanning:
+            self._rescan_after = True
+        else:
+            self.start_scan(quiet=True)
         return False
 
     # ---------------------------------------------------------------- playback
@@ -2390,6 +3138,48 @@ class MainWindow(Gtk.ApplicationWindow):
         pos, p = self.queue.set(paths, idx)
         self._play(pos, p, start)
 
+    def play_paths(self, paths, idx=0):
+        if paths:
+            pos, p = self.queue.set(paths, idx)
+            self._play(pos, p)
+
+    def queue_paths(self, paths, front):
+        """Play Next (front=True) or Add to Queue (front=False)."""
+        paths = [p for p in paths if self.get_track(p)]
+        if not paths:
+            return
+        if self.engine.state == "stopped":
+            if paths[0] in self.row_index:
+                self.play_visible(paths[0])
+            else:
+                self.play_paths([paths[0]])
+            paths = paths[1:]
+            if not paths:
+                return
+        self.queue.add_upnext(paths, front)
+        n = len(self.queue.upnext)
+        what = "Playing next" if front else "Added to queue"
+        self.flash_status("%s: %s  ·  %d song%s up next" % (
+            what, self.get_track(paths[0])["d_title"] + (" + %d more" % (len(paths) - 1) if len(paths) > 1 else ""),
+            n, "" if n == 1 else "s"))
+        self.song_view.queue_draw()
+
+    def clear_queue(self):
+        self.queue.clear_upnext()
+        self.flash_status("Up next cleared")
+        self.song_view.queue_draw()
+
+    def flash_status(self, text, secs=4):
+        self._update_status(text=text)
+        if getattr(self, "_flash_id", 0):
+            GLib.source_remove(self._flash_id)
+
+        def restore():
+            self._flash_id = 0
+            self._update_status()
+            return False
+        self._flash_id = GLib.timeout_add_seconds(secs, restore)
+
     def _play(self, pos, path, start=0.0):
         if not path:
             return
@@ -2405,8 +3195,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.engine.load(path, start)
         self._set_play_icon()
 
+    def _report_skipped(self):
+        gone = self.queue.take_skipped()
+        if gone:
+            names = ", ".join(os.path.basename(g) for g in gone[:3]) + (" and %d more" % (len(gone) - 3) if len(gone) > 3 else "")
+            self.show_error("Skipped %d song%s that %s moved, renamed or deleted: %s" % (
+                len(gone), "" if len(gone) == 1 else "s", "was" if len(gone) == 1 else "were", names))
+
     def on_stream_start(self):
         pend, self.pending = self.pending, None
+        self._report_skipped()
         if pend:
             self.queue.sync(*pend)
             self._errors = 0
@@ -2484,7 +3282,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self.song_view.queue_draw()
 
     def on_eos(self):
-        # Reached only when nothing was queued gaplessly (end of queue, repeat off)
+        # Normally only at the end of the queue. If the gapless handoff couldn't queue the next
+        # song for any reason, carry on instead of stopping.
+        nxt = self.queue.peek(1, auto=True)
+        if nxt:
+            self._play(*nxt)
+            return
+        self._report_skipped()
         self.engine.stop()
         self.seek.set_value(0)
         self.pos_label.set_text("0:00")
@@ -2564,6 +3368,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if nxt:
             self._play(*nxt)
         elif self.queue.order:
+            self._report_skipped()
             self.stop()
 
     def prev_track(self):
@@ -2838,6 +3643,10 @@ class MainWindow(Gtk.ApplicationWindow):
         n = len(paths)
         menu = Gtk.Menu()
         self._menu_item(menu, "Play", lambda: self.play_visible(paths[0]))
+        self._menu_item(menu, "Play Next" + ("" if n == 1 else " (%d)" % n), lambda: self.queue_paths(paths, True))
+        self._menu_item(menu, "Add to Queue" + ("" if n == 1 else " (%d)" % n), lambda: self.queue_paths(paths, False))
+        if self.queue.upnext:
+            self._menu_item(menu, "Clear Up Next (%d)" % len(self.queue.upnext), self.clear_queue)
         menu.append(Gtk.SeparatorMenuItem())
         all_fav = all(p in self.library.favs for p in paths)
         self._menu_item(menu, ("Remove from Favorites" if all_fav else "Add to Favorites") + ("" if n == 1 else " (%d)" % n),
@@ -2858,6 +3667,9 @@ class MainWindow(Gtk.ApplicationWindow):
         menu = Gtk.Menu()
         self._menu_item(menu, "Play", lambda: self.play_visible(self.visible_paths[0] if self.visible_paths else None))
         if key != ALL_KEY:
+            group = list(self.visible_paths)
+            self._menu_item(menu, "Play Next", lambda: self.queue_paths(group, True))
+            self._menu_item(menu, "Add to Queue", lambda: self.queue_paths(group, False))
             menu.append(Gtk.SeparatorMenuItem())
             if self.mode == "artists":
                 self._menu_item(menu, "Rename Artist…", lambda: self.rename_artist(key))
@@ -2964,6 +3776,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not jobs:
             return
         self._writing = True
+        self._ignore_fs_until = time.monotonic() + 3600
         self._update_status(text="Saving tags to {:,} file{}…".format(len(jobs), "" if len(jobs) == 1 else "s"))
 
         def work():
@@ -2980,7 +3793,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _write_done(self, tracks, errors):
         self._writing = False
-        self.album_thumbs.clear()
+        self._ignore_fs_until = time.monotonic() + 4
+        self._clear_thumbs()
         lib = [t for t in tracks if t["path"] in self.library.tracks]
         self.library.upsert(lib)
         for t in tracks:
@@ -3054,6 +3868,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 ("Ctrl + R", "Repeat: off → all → one"), ("Ctrl + 1 / 2 / 3", "Songs / Artists / Albums"),
                 ("Just type", "Search"), ("Esc", "Clear search"), ("Ctrl + E  or  F2", "Edit tags of selected songs"),
                 ("Ctrl + D", "👍 Favorite the playing song"), ("Ctrl + 4", "Favorites"),
+                ("Ctrl + Shift + E", "Equalizer"), ("Right-click a song", "Play Next / Add to Queue"),
                 ("Ctrl + J", "Jump to playing song"), ("Ctrl + M", "Mini player ⇄ library"),
                 ("Ctrl + O", "Choose music folder"),
                 ("F5", "Rescan folder"), ("Right-click", "Edit tags, rename artist / album"),
