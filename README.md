@@ -15,9 +15,11 @@ A small, no-fuss music player for Linux Mint (and Ubuntu / Debian).
 ## Install
 
 **[Download the latest player163 (.deb)](https://github.com/samokish-ivan/player163/releases/latest/download/player163_latest_all.deb)**,
-double-click it and choose **Install Package**. Or in a terminal:
+double-click it and choose **Install Package**.
 
-    sudo apt install ./player163_latest_all.deb
+Or download and install it from a terminal in one go:
+
+    wget -O /tmp/player163.deb https://github.com/samokish-ivan/player163/releases/latest/download/player163_latest_all.deb && sudo apt install /tmp/player163.deb
 
 Then start **player163** from the menu (Sound & Video), or run `player163`.
 
