@@ -8,9 +8,13 @@ A small, no-fuss music player for Linux Mint (and Ubuntu / Debian).
 | --- | --- |
 | ![Album grid in the light theme](screenshots/2-album-grid-light.png) | ![Artists view with album art](screenshots/3-artists-dark.png) |
 
-| Equalizer | Mini player, dark and light |
+| Player on the side, with Up Next | Playlists, light theme |
 | --- | --- |
-| ![Equalizer](screenshots/5-equalizer.png) | ![Mini player](screenshots/4-mini-player.png) |
+| ![Player as a side panel with the Up Next queue](screenshots/6-side-player-upnext-dark.png) | ![Playlists and smart lists](screenshots/7-playlists-light.png) |
+
+| Equalizer | Mini player, dark and light | Preferences |
+| --- | --- | --- |
+| ![Equalizer](screenshots/5-equalizer.png) | ![Mini player](screenshots/4-mini-player.png) | ![Preferences](screenshots/8-preferences.png) |
 
 ## Install
 
@@ -37,19 +41,49 @@ like any other update. To turn this off, disable the source in
 
 ## Use
 
-1. Click **Choose Music Folder…** and pick where your music lives. It scans it once;
-   after that, starting the app or pressing **F5** only re-reads new or changed files.
-   New music you add to the folder shows up on its own within a few seconds.
-2. Switch between **Songs / Artists / Albums / Favorites** at the top. Just start typing to search.
+1. On first start player163 uses your **Music** folder if it has music in it. Add more folders
+   (another drive, a NAS…) with ☰ → *Add Music Folder…*, in **Preferences** (Ctrl+,), or just
+   drop folders onto the window. Each folder is scanned once; after that only new or changed
+   files are read, and new music shows up on its own within a few seconds.
+2. Switch between **Songs / Artists / Albums / Favorites / Playlists** at the top. Just start typing to search.
    Albums can be shown as a list or a cover grid (buttons next to rescan).
 3. Double-click (or Enter) to play. The queue is whatever list you're looking at.
-4. Right-click songs (or an artist or album) for **Play Next** and **Add to Queue**.
+4. Right-click songs (or an artist or album) for **Play Next** and **Add to Queue**. The **Up Next**
+   panel (queue button in the player, or Ctrl+U) shows what's coming: drag to reorder, × to remove,
+   double-click to play now.
+5. Close the window while music plays and it keeps playing in the background. Bring it back from
+   the tray icon or by opening player163 again; quit with **Ctrl+Q** or the tray menu.
+
+### Playlists and smart lists
+
+**Playlists** (Ctrl+5) has four automatic lists: *Recently Added*, *Most Played*, *Recently Played*
+and *Never Played*, plus your own playlists. Right-click songs → *Add to Playlist*. In a playlist,
+**Delete** removes songs and **Alt+↑ / Alt+↓** moves them. Right-click a playlist to rename, export
+(.m3u) or delete it; *Import Playlist…* reads .m3u and .m3u8 files.
+
+### Audiobooks and podcasts
+
+Long files (over 20 minutes; you can change that) remember where you stopped and pick up there
+next time. Right-click → *Play from Start* to start over. A speed button (1× → 1.25× → 1.5× …)
+appears in the player for long files; voices keep their normal pitch.
+
+### Album covers
+
+Covers come from the files themselves or a `cover.jpg` / `folder.jpg` next to them. To set one,
+**drop an image** on an album (in the grid, the Albums list, or the playing song's artwork), or
+right-click an album → *Set Album Cover…*. The cover is written into the songs' files, and
+**Ctrl+Z** undoes it.
+
+Albums with no cover at all can be filled in from the internet: the first time you open Albums,
+player163 asks. If you agree, album and artist **names** are looked up on MusicBrainz and the front
+cover is downloaded from the Cover Art Archive. Downloaded covers are kept by player163 and don't
+change your files. Right-click an album → *Find Cover Online* to try one album by hand.
 
 ### Artist pictures
 
 Right-click an artist → **Set Artist Picture…** to use your own image. You can also let player163
-find free photos: the first time you open Artists it asks, and you can change your mind in the ☰ menu
-(*Artist Photos from Wikimedia*). When it's on, your artists' **names** (nothing else) are looked up
+find free photos: the first time you open Artists it asks, and you can change your mind in
+Preferences → Online. You can also drop an image on an artist. When it's on, your artists' **names** (nothing else) are looked up
 on MusicBrainz and Wikidata, and freely licensed photos are downloaded from Wikimedia Commons. Hover a
 photo to see who took it and its license.
 
@@ -68,6 +102,7 @@ photo to see who took it and its license.
   With many songs selected, only the fields you change are written.
 
 Tags are written to the files themselves, so other players see the fixes too.
+Changed your mind? Click **Undo** in the bar that appears, or press **Ctrl+Z**.
 
 ## Favorites 👍
 
@@ -99,8 +134,10 @@ to a tiny strip: album art, song, play controls, shuffle/repeat, volume and seek
 
 ## Look
 
-Black + yellow dark theme by default; switch to the light theme from the ☰ menu
-(*Dark Theme* / *Light Theme*). Brand assets (icon + wordmark lockup SVGs) are in `data/`.
+Black + yellow dark theme by default; switch to the light theme from the ☰ menu or Preferences.
+In **Preferences → Appearance** you can also move the player controls from the bottom to a tall
+panel on the **left or right** with big artwork, and make the text larger.
+Brand assets (icon + wordmark lockup SVGs) are in `data/`.
 
 ## Formats
 
@@ -116,15 +153,18 @@ For the rarer formats, also install: `sudo apt install gstreamer1.0-plugins-bad 
 | Ctrl+→ / Ctrl+← | Next / previous |
 | Ctrl+↑ / Ctrl+↓ | Volume |
 | Ctrl+S / Ctrl+R | Shuffle / repeat (off → all → one) |
-| Ctrl+1 / 2 / 3 / 4 | Songs / Artists / Albums / Favorites |
+| Ctrl+1 / 2 / 3 / 4 / 5 | Songs / Artists / Albums / Favorites / Playlists |
 | Esc | Clear search |
 | Ctrl+E or F2 | Edit tags |
 | Ctrl+D | Favorite the playing song |
-| Ctrl+4 | Favorites |
 | Ctrl+J | Jump to playing song |
 | Ctrl+M | Mini player ⇄ library |
 | Ctrl+Shift+E | Equalizer |
-| Ctrl+O / F5 | Choose folder / rescan |
+| Ctrl+U | Up Next panel |
+| Ctrl+Z | Undo the last tag or cover change |
+| Ctrl+, | Preferences |
+| Ctrl+O / F5 | Add a music folder / rescan |
+| Ctrl+Q | Quit (also stops background playback) |
 
 Keyboard media keys and the Cinnamon sound applet work too (MPRIS).
 
@@ -133,6 +173,7 @@ Keyboard media keys and the Cinnamon sound applet work too (MPRIS).
 - Settings: `~/.config/player163/config.json`
 - Library cache: `~/.local/share/player163/library.db` (safe to delete; it rebuilds)
 - Artist pictures: `~/.local/share/player163/artists/`
+- Album covers set in player163 or downloaded: `~/.local/share/player163/covers/`
 
 ## Rebuild the .deb
 

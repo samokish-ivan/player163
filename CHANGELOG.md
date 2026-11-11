@@ -2,6 +2,30 @@
 
 All notable changes to player163. Newest first.
 
+## [1.7.0] — 2026-11-11
+
+Includes the 1.6.1 artist-photo fix.
+
+### Added
+- **Player on the side**: Preferences → Appearance → *Player controls* puts the player in a tall panel on the left or right with big artwork, instead of the bar at the bottom.
+- **Up Next panel** (queue button or Ctrl+U): see what's queued and what plays after it, drag to reorder, × to remove, double-click to play now.
+- **Playlists and smart lists** (Ctrl+5): your own playlists plus *Recently Added*, *Most Played*, *Recently Played* and *Never Played*. Add songs from the right-click menu, reorder with Alt+↑/↓, remove with Delete, import and export .m3u.
+- **Undo** for tag edits, renames and covers: an *Undo* button appears after saving, or press Ctrl+Z.
+- **Album covers**: drop an image on an album (grid, Albums list or the now-playing artwork) or right-click → *Set Album Cover…*; the cover is written into the songs' files (FLAC, MP3, M4A/ALAC, Ogg/Opus, WAV, AIFF).
+- **Missing album covers from the internet** (optional, asked the first time you open Albums): looked up on MusicBrainz and downloaded from the Cover Art Archive. Your files aren't changed. Right-click → *Find Cover Online* for a single album.
+- **Keeps playing when you close the window** (while music is playing), with a **tray icon**: click to show or hide, right-click for play/pause, next, previous and quit.
+- **Song notifications** when the player window isn't in front.
+- **Audiobooks and podcasts**: long files remember where you stopped and resume there (*Play from Start* in the right-click menu), and can play at 0.75×–2× without changing voices' pitch.
+- **Several music folders**, added from the menu, Preferences or by dropping folders on the window. On first start, your Music folder is used automatically. A folder on a drive that isn't connected keeps its songs in the library.
+- **Preferences window** (Ctrl+,): folders, folder watching, volume leveling, equalizer, long-file options, background playback, tray icon, notifications, theme, player position, text size, album view and online pictures, all in one place and applied immediately.
+- **Larger text** option.
+
+## [1.6.1] — 2026-11-11
+
+### Fixed
+- **Artist photos never downloaded.** Wikimedia now only serves images in standard sizes and refused the size player163 asked for. Photos are now requested in a standard size (with smaller fallbacks), and the app identifies itself the way Wikimedia's rules ask.
+- If artist photos can't be downloaded (offline, service down), player163 now says so once instead of failing silently, and tries again next time.
+
 ## [1.6.0] — 2026-11-11
 
 ### Added

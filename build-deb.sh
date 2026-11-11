@@ -71,7 +71,7 @@ Priority: optional
 Architecture: all
 Installed-Size: ${SIZE}
 Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
-Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire, gir1.2-xapp-1.0
 Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
 Homepage: https://ivansamokish.com
 Description: Small, no-fuss music player for your music folder
