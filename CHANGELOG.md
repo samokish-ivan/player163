@@ -2,6 +2,17 @@
 
 All notable changes to player163. Newest first.
 
+## [1.6.0] — 2026-11-11
+
+### Added
+- **Artist pictures** in the Artists list, as round avatars:
+  - **Your own picture**: right-click an artist → *Set Artist Picture…*. It always takes priority, and stays with the artist when you rename them.
+  - **Free photos from Wikimedia Commons** (optional): the first time you open Artists, player163 asks whether to look them up. If you agree, it matches each artist on MusicBrainz and Wikidata and downloads a freely licensed photo. Hover a photo to see the photographer and license; right-click → *About This Photo* opens its Commons page, or *Remove This Photo* if it's the wrong one. Turn it on or off anytime in the ☰ menu.
+  - Artists without a picture show a clean initial instead.
+
+### Changed
+- The Artists list no longer shows album covers next to artist names.
+
 ## [1.5.0] — 2026-11-11
 
 ### Added

@@ -45,6 +45,14 @@ like any other update. To turn this off, disable the source in
 3. Double-click (or Enter) to play. The queue is whatever list you're looking at.
 4. Right-click songs (or an artist or album) for **Play Next** and **Add to Queue**.
 
+### Artist pictures
+
+Right-click an artist → **Set Artist Picture…** to use your own image. You can also let player163
+find free photos: the first time you open Artists it asks, and you can change your mind in the ☰ menu
+(*Artist Photos from Wikimedia*). When it's on, your artists' **names** (nothing else) are looked up
+on MusicBrainz and Wikidata, and freely licensed photos are downloaded from Wikimedia Commons. Hover a
+photo to see who took it and its license.
+
 ### Sound
 
 - **Volume leveling** (☰ → Volume Leveling): evens out loud and quiet songs, per song or per album.
@@ -124,6 +132,7 @@ Keyboard media keys and the Cinnamon sound applet work too (MPRIS).
 
 - Settings: `~/.config/player163/config.json`
 - Library cache: `~/.local/share/player163/library.db` (safe to delete; it rebuilds)
+- Artist pictures: `~/.local/share/player163/artists/`
 
 ## Rebuild the .deb
 
