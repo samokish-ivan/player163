@@ -1,0 +1,126 @@
+Package: player163
+Version: 1.3.0
+Architecture: all
+Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
+Installed-Size: 260
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire
+Filename: pool/main/p/player163/player163_1.3.0_all.deb
+Size: 50834
+MD5sum: c6ff1563e73999707700672d29fe0791
+SHA1: b607088c877c002bba21c25348bcb54c05f56187
+SHA256: 765dcdb50693aaec2b64cf0e00095cde9c39fa05e6d1e807bed2d0512fa39171
+Section: sound
+Priority: optional
+Homepage: https://ivansamokish.com
+Description: Small, no-fuss music player for your music folder
+ Point it at a folder: it scans it, sorts by artist and album, and lets you
+ fix tags (rename a misspelled artist across all its songs in one go).
+ Gapless playback of FLAC, ALAC, MP3, AAC, Ogg, Opus, WAV, AIFF, APE,
+ WavPack, WMA and more via GStreamer. Shuffle, repeat, volume, media keys.
+
+Package: player163
+Version: 1.4.0
+Architecture: all
+Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
+Installed-Size: 268
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire
+Filename: pool/main/p/player163/player163_1.4.0_all.deb
+Size: 53076
+MD5sum: e3d8d889761c98d8169d072c3a9b3977
+SHA1: c132e801c8a3f0b03047db59985406d276dc57a5
+SHA256: 5402710d05673688a6308eda62eba7bb58922323d5c86878ef180e763888f16a
+Section: sound
+Priority: optional
+Homepage: https://ivansamokish.com
+Description: Small, no-fuss music player for your music folder
+ Point it at a folder: it scans it, sorts by artist and album, and lets you
+ fix tags (rename a misspelled artist across all its songs in one go).
+ Gapless playback of FLAC, ALAC, MP3, AAC, Ogg, Opus, WAV, AIFF, APE,
+ WavPack, WMA and more via GStreamer. Shuffle, repeat, volume, media keys.
+
+Package: player163
+Version: 1.5.0
+Architecture: all
+Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
+Installed-Size: 308
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire
+Filename: pool/main/p/player163/player163_1.5.0_all.deb
+Size: 61538
+MD5sum: 9e16c2d62e624caddbfce35fee0138da
+SHA1: 90e41c67f5dd6c4d225fc55569a2ae29257013ec
+SHA256: 29ebf123bd7a494258202c347c898f8742b002f2ad22bbdce90569efe77e85f3
+Section: sound
+Priority: optional
+Homepage: https://ivansamokish.com
+Description: Small, no-fuss music player for your music folder
+ Point it at a folder: it scans it, sorts by artist and album, and lets you
+ fix tags (rename a misspelled artist across all its songs in one go).
+ Gapless playback of FLAC, ALAC, MP3, AAC, Ogg, Opus, WAV, AIFF, APE,
+ WavPack, WMA and more via GStreamer. Shuffle, repeat, volume, media keys.
+
+Package: player163
+Version: 1.6.0
+Architecture: all
+Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
+Installed-Size: 320
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire
+Filename: pool/main/p/player163/player163_1.6.0_all.deb
+Size: 65482
+MD5sum: 061867bd989a6d09e758f17e9d292229
+SHA1: 7f8b9551b0cb69fac7b00fb2b0cb1cc11b5a9aaf
+SHA256: 0e09e10326cbea2e15ef50a74f6b5826faf44167006300fcadd72ac0ea0d98ea
+Section: sound
+Priority: optional
+Homepage: https://ivansamokish.com
+Description: Small, no-fuss music player for your music folder
+ Point it at a folder: it scans it, sorts by artist and album, and lets you
+ fix tags (rename a misspelled artist across all its songs in one go).
+ Gapless playback of FLAC, ALAC, MP3, AAC, Ogg, Opus, WAV, AIFF, APE,
+ WavPack, WMA and more via GStreamer. Shuffle, repeat, volume, media keys.
+
+Package: player163
+Version: 1.7.0
+Architecture: all
+Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
+Installed-Size: 408
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire, gir1.2-xapp-1.0
+Filename: pool/main/p/player163/player163_1.7.0_all.deb
+Size: 82384
+MD5sum: 1682612f6cd5a9a32b8fba9cb26adbaa
+SHA1: 8df6c5e8d35cec55fc6d11b92d5ed3debb0f4247
+SHA256: 77cbc2ffe72a9daf4d4d58a965509c9f0ca6c47b28bbfd22a1e8bcebf13d4b62
+Section: sound
+Priority: optional
+Homepage: https://ivansamokish.com
+Description: Small, no-fuss music player for your music folder
+ Point it at a folder: it scans it, sorts by artist and album, and lets you
+ fix tags (rename a misspelled artist across all its songs in one go).
+ Gapless playback of FLAC, ALAC, MP3, AAC, Ogg, Opus, WAV, AIFF, APE,
+ WavPack, WMA and more via GStreamer. Shuffle, repeat, volume, media keys.
+
+Package: player163
+Version: 1.7.1
+Architecture: all
+Maintainer: Ivan Samokish <ivan.samokish@gmail.com>
+Installed-Size: 400
+Depends: python3 (>= 3.8), python3-gi, python3-gi-cairo, python3-mutagen, gir1.2-gtk-3.0, gir1.2-gstreamer-1.0, gir1.2-gst-plugins-base-1.0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Recommends: gstreamer1.0-plugins-ugly, gstreamer1.0-plugins-bad, gstreamer1.0-pulseaudio | gstreamer1.0-pipewire, gir1.2-xapp-1.0
+Filename: pool/main/p/player163/player163_1.7.1_all.deb
+Size: 82184
+MD5sum: a25511e99abcecb3f596da2456fbb757
+SHA1: b2b8b9792077e5fcd4596f42934cb3a42f4af8f6
+SHA256: 98a1fd294e4e0f7fe9bac1246a507e46e32b6a327df57c06b1cb06327540a05c
+Section: sound
+Priority: optional
+Homepage: https://ivansamokish.com
+Description: Small, no-fuss music player for your music folder
+ Point it at a folder: it scans it, sorts by artist and album, and lets you
+ fix tags (rename a misspelled artist across all its songs in one go).
+ Gapless playback of FLAC, ALAC, MP3, AAC, Ogg, Opus, WAV, AIFF, APE,
+ WavPack, WMA and more via GStreamer. Shuffle, repeat, volume, media keys.
+
