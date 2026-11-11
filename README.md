@@ -39,7 +39,8 @@ like any other update. To turn this off, disable the source in
 
 1. Click **Choose Music Folder…** and pick where your music lives. It scans it once;
    after that, starting the app or pressing **F5** only re-reads new or changed files.
-2. Switch between **Songs / Artists / Albums** at the top. Just start typing to search.
+2. Switch between **Songs / Artists / Albums / Favorites** at the top. Just start typing to search.
+   The Albums list shows each album's cover art.
 3. Double-click (or Enter) to play. The queue is whatever list you're looking at.
 
 ### Fixing tags (typos etc.)

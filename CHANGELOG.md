@@ -2,6 +2,18 @@
 
 All notable changes to player163. Newest first.
 
+## [1.4.0] — 2026-11-11
+
+### Added
+- **Album artwork in the Albums list**: each album shows a small cover thumbnail (from the songs' embedded art or a cover.jpg in the folder). Albums without art get a subtle placeholder. Thumbnails load in the background and are cached, so large libraries stay fast.
+
+### Changed
+- Remembers more between sessions: the window's position, and the artist or album you had selected in each view. On startup the list scrolls to the song you were last playing.
+- A remembered window position on a monitor that's no longer connected is ignored, so the window never opens off-screen.
+
+### Fixed
+- Clicking "All Artists" or "All Albums" after selecting an artist or album showed an empty list instead of every song.
+
 ## [1.3.0] — 2026-11-11
 
 ### Added

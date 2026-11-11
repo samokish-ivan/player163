@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import queue
 import random
 import re
 import sqlite3
@@ -50,12 +51,14 @@ except ImportError:  # pragma: no cover
 
 APP_NAME = "player163"
 APP_ID = "com.smokyfish.Player163"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "player163")
 DATA_DIR = os.path.join(GLib.get_user_data_dir(), "player163")
 CACHE_DIR = os.path.join(GLib.get_user_cache_dir(), "player163")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+THUMB_DIR = os.path.join(CACHE_DIR, "thumbs")
+ALBUM_THUMB = 40
 
 AUDIO_EXTS = {
     ".mp3", ".mp2", ".flac", ".m4a", ".m4b", ".mp4", ".alac", ".aac", ".ogg", ".oga",
@@ -65,7 +68,7 @@ AUDIO_EXTS = {
 
 UNKNOWN_ARTIST = "Unknown Artist"
 UNKNOWN_ALBUM = "Unknown Album"
-ALL_KEY = "\x00ALL"
+ALL_KEY = "__player163_all__"  # must not contain NUL: GTK stores C strings
 ART_SIZE = 52
 
 # ----------------------------------------------------------------------------------------
@@ -111,6 +114,20 @@ def to_year(s):
 
 def esc(s):
     return GLib.markup_escape_text(s or "")
+
+
+def on_screen(x, y):
+    """True if (x, y) lies on a connected monitor (a saved window spot may be on an unplugged screen)."""
+    try:
+        x, y = int(x), int(y)
+        disp = Gdk.Display.get_default()
+        for i in range(disp.get_n_monitors()):
+            g = disp.get_monitor(i).get_geometry()
+            if g.x <= x < g.x + g.width - 60 and g.y <= y < g.y + g.height - 60:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def load_config():
@@ -1240,6 +1257,70 @@ def thumb_surface(size, filled, color, alpha=1.0, scale=1):
         return None
 
 
+def placeholder_surface(size, bg, fg, scale=1):
+    """Rounded square with a faint player163 mark, for albums without artwork."""
+    if cairo is None:
+        return None
+    try:
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size * scale, size * scale)
+        surf.set_device_scale(scale, scale)
+        cr = cairo.Context(surf)
+        _rounded_rect(cr, 0, 0, size, size, 5)
+        cr.set_source_rgb(*_hex_rgb(bg))
+        cr.fill()
+        cr.translate(size * 0.27, size * 0.27)
+        draw_logo(cr, size * 0.46, background=False, color=fg)
+        return surf
+    except Exception:
+        return None
+
+
+class ThumbLoader:
+    """Album-art thumbnails, made in a background thread and cached on disk."""
+
+    def __init__(self, size, scale, on_ready):
+        self.size, self.scale, self.on_ready = size, scale, on_ready
+        self.q = queue.Queue()
+        self.pending = set()  # touched only from the main thread
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def request(self, key, path):
+        if key not in self.pending:
+            self.pending.add(key)
+            self.q.put((key, path))
+
+    def _cache_base(self, key, path):
+        try:
+            tm = os.stat(path).st_mtime
+            dm = os.stat(os.path.dirname(path)).st_mtime  # changes when a cover.jpg is added
+        except OSError:
+            tm = dm = 0
+        raw = "%s|%s|%s|%s|%d" % (key, path, tm, dm, self.size * self.scale)
+        return os.path.join(THUMB_DIR, hashlib.md5(raw.encode("utf-8", "surrogateescape"),
+                                                   usedforsecurity=False).hexdigest())
+
+    def _run(self):
+        while True:
+            key, path = self.q.get()
+            pb = None
+            try:
+                base = self._cache_base(key, path)
+                if os.path.exists(base + ".png"):
+                    pb = GdkPixbuf.Pixbuf.new_from_file(base + ".png")
+                elif not os.path.exists(base + ".none"):
+                    data = find_cover(path)
+                    pb = pixbuf_from_bytes(data, self.size * self.scale) if data else None
+                    os.makedirs(THUMB_DIR, exist_ok=True)
+                    if pb is not None:
+                        pb = rounded_pixbuf(pb, 5 * self.scale)
+                        pb.savev(base + ".png", "png", [], [])
+                    else:
+                        open(base + ".none", "w").close()
+            except Exception:
+                pb = None
+            GLib.idle_add(self.on_ready, key, path, pb)
+
+
 def logo_pixbuf(size, background=True, color=BRAND_YELLOW, bg_color="#0b0b0b"):
     if cairo is None:
         return None
@@ -1404,7 +1485,7 @@ class MiniPlayer(Gtk.ApplicationWindow):
 
     def show_mini(self):
         x, y = self.main.cfg.get("mini_x"), self.main.cfg.get("mini_y")
-        if x is not None and y is not None:
+        if x is not None and y is not None and on_screen(x, y):
             self.move(int(x), int(y))
         else:
             mx, my = self.main.get_position()
@@ -1493,6 +1574,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_default_size(self.cfg.get("width", 1080), self.cfg.get("height", 680))
         if self.cfg.get("maximized"):
             self.maximize()
+        if "x" in self.cfg and on_screen(self.cfg["x"], self.cfg["y"]):
+            self.move(int(self.cfg["x"]), int(self.cfg["y"]))
         self.set_icon_name("player163")
 
         self.library = Library(os.path.join(DATA_DIR, "library.db"))
@@ -1506,7 +1589,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.pending = None          # (queue pos, path) of the file the engine is about to start
         self.extra = {}              # tracks opened from outside the library folder
         self.mode = self.cfg.get("mode", "songs") if self.cfg.get("mode") in ("songs", "artists", "albums", "favorites") else "songs"
-        self.group_sel = None
+        self.group_sel = self.cfg.get("sel_" + self.mode) if self.mode in ("artists", "albums") else None
+        self.album_thumbs = {}       # album key -> (track path, cairo surface or None)
         self.sort_col = None
         self.sort_desc = False
         self.visible_paths = []
@@ -1525,7 +1609,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._scan_new = set()
 
         self._apply_css()
-        self._main_pos = None
+        self._main_pos = (int(self.cfg["x"]), int(self.cfg["y"])) if "x" in self.cfg and on_screen(self.cfg["x"], self.cfg["y"]) else None
         self._build_ui()
         self.mini = MiniPlayer(self)
         self.update_fav_buttons()
@@ -1561,6 +1645,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if last and last in self.library.tracks:
                 self._resume = (last, float(self.cfg.get("last_pos", 0)))
                 self._show_now_playing(last)
+                GLib.idle_add(self._scroll_to_path, last)
         else:
             self.stack.set_visible_child_name("empty")
         self._set_play_icon()
@@ -1705,7 +1790,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.group_view.get_style_context().add_class("sidebar-list")
         self.group_view.set_search_equal_func(self._group_search_eq)
         gcell = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END, ypad=4, xpad=6)
-        self.group_view.append_column(Gtk.TreeViewColumn("", gcell, markup=1))
+        gcol = Gtk.TreeViewColumn("")
+        self.thumb_cell = Gtk.CellRendererPixbuf(xpad=4, ypad=3)
+        self.thumb_cell.set_fixed_size(ALBUM_THUMB + 8, ALBUM_THUMB + 6)
+        gcol.pack_start(self.thumb_cell, False)
+        gcol.set_cell_data_func(self.thumb_cell, self._cell_group_thumb)
+        gcol.pack_start(gcell, True)
+        gcol.add_attribute(gcell, "markup", 1)
+        self.group_view.append_column(gcol)
+        self._thumb_loader = ThumbLoader(ALBUM_THUMB, max(1, self.get_scale_factor()), self._thumb_ready)
         self.group_view.get_selection().connect("changed", self._on_group_changed)
         self.group_view.connect("button-press-event", self._on_group_button)
         self.group_view.connect("row-activated", lambda *a: self.play_visible(None))
@@ -1881,9 +1974,44 @@ class MainWindow(Gtk.ApplicationWindow):
         sel = self.song_view.get_selection().iter_is_selected(it)
         cell.set_property("surface", self._thumbs["list_" + ("on" if on else "off") + ("_sel" if sel else "")])
 
+    def _cell_group_thumb(self, col, cell, model, it, data):
+        if self.mode != "albums":
+            cell.set_visible(False)
+            return
+        cell.set_visible(True)
+        key = model.get_value(it, 0)
+        if key == ALL_KEY:
+            cell.set_property("surface", self._blank_thumb)
+            return
+        e = self.album_thumbs.get(key)
+        cell.set_property("surface", e[1] if e and e[1] is not None else self._album_placeholder)
+
+    def _thumb_ready(self, key, path, pb):
+        self._thumb_loader.pending.discard(key)
+        surf = None
+        if pb is not None:
+            try:
+                surf = Gdk.cairo_surface_create_from_pixbuf(pb, max(1, self.get_scale_factor()), None)
+            except Exception:
+                surf = None
+        self.album_thumbs[key] = (path, surf)
+        if self.mode == "albums":
+            self.group_view.queue_draw()
+        return False
+
     def _render_thumbs(self):
         pal = PALETTES[self.scheme]
         sf = max(1, self.get_scale_factor())
+        if cairo is not None:
+            self._blank_thumb = cairo.ImageSurface(cairo.FORMAT_ARGB32, ALBUM_THUMB * sf, ALBUM_THUMB * sf)
+            self._blank_thumb.set_device_scale(sf, sf)
+        else:
+            self._blank_thumb = None
+        self._album_placeholder = placeholder_surface(
+            ALBUM_THUMB, "#1e1e1e" if self.scheme == "dark" else "#e8e8e3",
+            "#4a4a4a" if self.scheme == "dark" else "#b9b9b3", sf)
+        if hasattr(self, "group_view"):
+            self.group_view.queue_draw()
         self._thumbs = {
             "list_on": thumb_surface(15, True, pal["accent_text"], 1.0, sf),
             "list_on_sel": thumb_surface(15, True, pal["accent_fg"], 1.0, sf),
@@ -1940,7 +2068,9 @@ class MainWindow(Gtk.ApplicationWindow):
             key = t["d_artist"] if self.mode == "artists" else t["album_key"]
             g = groups.get(key)
             if g is None:
-                groups[key] = g = {"n": 0, "t": t, "albums": set(), "year": ""}
+                groups[key] = g = {"n": 0, "t": t, "albums": set(), "year": "", "rep": t}
+            if (t["disc"], t["track"], t["path"]) < (g["rep"]["disc"], g["rep"]["track"], g["rep"]["path"]):
+                g["rep"] = t  # first track of the album: its art (or folder cover) is the album's
             g["n"] += 1
             g["albums"].add(t["album"])
             if t["year"] and (not g["year"] or t["year"] < g["year"]):
@@ -1971,6 +2101,10 @@ class MainWindow(Gtk.ApplicationWindow):
                         bits.append(g["year"])
                     bits.append("%d song%s" % (g["n"], "" if g["n"] == 1 else "s"))
                     markup = "%s\n<small><span alpha='60%%'>%s</span></small>" % (esc(t["d_album"]), " · ".join(bits))
+                    rep_path = g["rep"]["path"]
+                    have = self.album_thumbs.get(k)
+                    if have is None or have[0] != rep_path:
+                        self._thumb_loader.request(k, rep_path)
                 self.group_store.append([k, markup])
             self.group_view.set_model(self.group_store)
             sel = self.group_view.get_selection()
@@ -2072,7 +2206,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not btn.get_active() or not self._ready:
             return
         self.mode = key
-        self.group_sel = None
+        self.group_sel = self.cfg.get("sel_" + key) if key in ("artists", "albums") else None
         self.sort_col = None
         self._update_sort_indicators()
         self._apply_mode_visibility()
@@ -2085,6 +2219,8 @@ class MainWindow(Gtk.ApplicationWindow):
         model, it = sel.get_selected()
         key = model.get_value(it, 0) if it else ALL_KEY
         self.group_sel = None if key == ALL_KEY else key
+        if self.mode in ("artists", "albums"):
+            self.cfg["sel_" + self.mode] = self.group_sel
         self.sort_col = None
         self._update_sort_indicators()
         self.refresh_songs()
@@ -2137,6 +2273,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self._scan_gen += 1
             self.library.clear()
             self.group_sel = None
+            self.album_thumbs.clear()
+            for k in ("sel_artists", "sel_albums", "last_path", "last_pos"):
+                self.cfg.pop(k, None)
             self.cfg["folder"] = path
             save_config(self.cfg)
         self.stack.set_visible_child_name("library")
@@ -2226,6 +2365,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         if old:
                             self.library.move_favorite(old, p)
         self._scan_new = set()
+        self.album_thumbs.clear()  # covers may have been added/changed; the disk cache makes this cheap
         self.scan_spinner.stop()
         self.scan_spinner.hide()
         if self._scan_refresh_id:
@@ -2840,6 +2980,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _write_done(self, tracks, errors):
         self._writing = False
+        self.album_thumbs.clear()
         lib = [t for t in tracks if t["path"] in self.library.tracks]
         self.library.upsert(lib)
         for t in tracks:
@@ -2939,10 +3080,19 @@ class MainWindow(Gtk.ApplicationWindow):
         a.run()
         a.destroy()
 
+    def _scroll_to_path(self, path):
+        i = self.row_index.get(path)
+        if i is not None:
+            self.song_view.scroll_to_cell(Gtk.TreePath(i), None, True, 0.4, 0)
+        return False
+
     def save_state(self):
         if not self.is_maximized():
             w, h = self.get_size()
             self.cfg["width"], self.cfg["height"] = w, h
+            pos = self.get_position() if self.get_visible() else self._main_pos
+            if pos:
+                self.cfg["x"], self.cfg["y"] = int(pos[0]), int(pos[1])
         self.cfg["maximized"] = self.is_maximized()
         self.cfg["pane"] = self.paned.get_position() if self.sidebar.get_visible() else self.cfg.get("pane", 250)
         for sid, col in self.sort_columns.items():
